@@ -268,7 +268,7 @@ class StatusScreen(Screen):
         self.search = ModernInput(hint_text="Search Player ID...", size_hint_y=None, height=60); self.search.bind(text=self.refresh); l.add_widget(self.search)
         self.scroll = ScrollView(); self.grid = GridLayout(cols=1, spacing=25, size_hint_y=None); self.grid.bind(minimum_height=self.grid.setter('height'))
 self.scroll.add_widget(self.grid); l.add_widget(self.scroll); l.add_widget(ModernButton(text="BAZGASHT", height=55, size_hint_y=None, on_press=lambda x: setattr(self.manager, 'current', 'entry'))); self.add_widget(l)
-    def refresh(self, *args):
+    def refresh(self,*args):
         q = self.search.text.strip().lower(); self.grid.clear_widgets()
         with db_lock: items = sorted(list(DATA["game_db"].items()))
         for uid, rep in items:
