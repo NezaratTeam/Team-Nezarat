@@ -5,6 +5,7 @@ package.domain = ir.mafia
 source.dir = .
 source.include_exts = py,png,jpg,json,kv
 version = 0.1
+# پیش‌نیازهای اصلاح شده (سایفون حذف شد چون در yml نصب می‌شود)
 requirements = python3,kivy==2.2.1,requests,urllib3,certifi,chardet,idna
 android.permissions = INTERNET
 android.api = 31
@@ -15,6 +16,7 @@ android.archs = armeabi-v7a
 icon.filename = logo.png
 orientation = portrait
 fullscreen = 0
+
 [buildozer]
 log_level = 2
 warn_on_root = 0
