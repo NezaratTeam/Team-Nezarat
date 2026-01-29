@@ -1,5 +1,5 @@
 name: Build APK
-on: [push, pull_request]
+on: [push]
 
 jobs:
   build:
@@ -7,15 +7,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build with Buildozer
-        # استفاده از معتبرترین اکشن موجود که خودش لایسنس‌ها رو تایید می‌کنه
-        uses: ArtemSerebrennkov/buildozer-action@v1
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          buildozer_version: master
-          command: buildozer android debug
-          
+          python-version: '3.11'
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential git ffmpeg libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev libportmidi-dev libswscale-dev libavformat-dev libavcodec-dev zlib1g-dev libgstreamer1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good libsqlite3-dev sqlite3 bzip2 libbz2-dev libssl-dev openssl libgdbm-dev libgdbm-compat-dev liblzma-dev libreadline-dev uuid-dev libffi-dev tk-dev
+          pip install --upgrade pip
+          pip install "Cython<3.0" buildozer
+
+      - name: Build APK
+        run: |
+          export PATH=$PATH:$HOME/.local/bin
+          # این خط لایسنس‌ها رو تایید می‌کنه و لاگ کامل میده
+          yes | buildozer android debug
+        continue-on-error: false
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: TeamNezarat-App
+          name: TeamNezarat-Final
           path: bin/*.apk
