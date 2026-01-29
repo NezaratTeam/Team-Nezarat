@@ -178,6 +178,7 @@ class LogCard(BoxLayout):
         with self.canvas.before: 
             Color(0.12, 0.15, 0.2, 1)
             RoundedRectangle(pos=self.pos, size=self.size, radius=[10,])
+
 class LoginScreen(Screen):
     def on_enter(self): 
         with db_lock:
@@ -267,8 +268,8 @@ class StatusScreen(Screen):
         super().__init__(**kw); l = BoxLayout(orientation='vertical', padding=20, spacing=15)
         self.search = ModernInput(hint_text="Search Player ID...", size_hint_y=None, height=60); self.search.bind(text=self.refresh); l.add_widget(self.search)
         self.scroll = ScrollView(); self.grid = GridLayout(cols=1, spacing=25, size_hint_y=None); self.grid.bind(minimum_height=self.grid.setter('height'))
-self.scroll.add_widget(self.grid); l.add_widget(self.scroll); l.add_widget(ModernButton(text="BAZGASHT", height=55, size_hint_y=None, on_press=lambda x: setattr(self.manager, 'current', 'entry'))); self.add_widget(l)
-    def refresh(self,*args):
+        self.scroll.add_widget(self.grid); l.add_widget(self.scroll); l.add_widget(ModernButton(text="BAZGASHT", height=55, size_hint_y=None, on_press=lambda x: setattr(self.manager, 'current', 'entry'))); self.add_widget(l)
+    def refresh(self, *args):
         q = self.search.text.strip().lower(); self.grid.clear_widgets()
         with db_lock: items = sorted(list(DATA["game_db"].items()))
         for uid, rep in items:
@@ -407,6 +408,7 @@ class BlacklistScreen(Screen):
         with db_lock:
             if uid in DATA["blacklist"]: DATA["blacklist"].remove(uid)
         add_log(f"Un-Blacklisted: {uid}"); save_db(); self.refresh()
+
 class TeamNezaratApp(App):
     def build(self):
         # تعریف متغیر اختصاصی برای حل باگ ادمین
