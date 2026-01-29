@@ -48,7 +48,8 @@ def get_jalali_date():
         else: jm, jd = 12, j_day_no + 1
         return f"{jy}/{jm:02d}/{jd:02d}"
     except: return "1404/11/08"
-# --- SUPABASE CONFIG ---
+
+# --- SUPABASE CONFIG (UPDATED FOR NEW KEY) ---
 SUPABASE_URL = "https://uvgulzboypyysfkciriz.supabase.co"
 SUPABASE_KEY = "sb_publishable_KqkKEFBeF80hS30BPNP4bQ_KKFosDXy" 
 
@@ -75,7 +76,8 @@ def save_db(target_key=None):
                 "Content-Type": "application/json",
                 "Prefer": "resolution=merge-duplicates"
             }
-            with db_lock: payload = {"data_key": "main_sync", "content": DATA.copy()}
+            with db_lock:
+                payload = {"data_key": "main_sync", "content": DATA.copy()}
             requests.post(f"{SUPABASE_URL}/rest/v1/mafia_db", json=payload, headers=headers, timeout=15)
         except: pass
         finally: _is_syncing = False
@@ -99,7 +101,6 @@ def load_db():
                 with db_lock: DATA.update(cloud_data)
         except: pass
     threading.Thread(target=fetch_cloud, daemon=True).start()
-
 def add_log(msg):
     with db_lock:
         if "system_logs" not in DATA: DATA["system_logs"] = []
@@ -110,6 +111,7 @@ def add_log(msg):
     save_db("system_logs")
 
 load_db()
+
 class ModernButton(Button):
     def __init__(self, bg_color=(0.18, 0.22, 0.3, 1), radius=[12,], **kwargs):
         super().__init__(**kwargs); self.background_normal = ""; self.background_color = (0,0,0,0)
@@ -190,24 +192,46 @@ class LoginScreen(Screen):
 
 class EntryScreen(Screen):
     def __init__(self, **kw):
-        super().__init__(**kw); l = BoxLayout(orientation='vertical', padding=20, spacing=12)
-        l.add_widget(Label(text="PANELE NEZARAT", bold=True, size_hint_y=0.1))
+        super().__init__(**kw); self.taps = 0; self.last_tap = 0; l = BoxLayout(orientation='vertical', padding=20, spacing=12)
+        l.add_widget(Label(text="PANELE NEZARAT", bold=True, size_hint_y=0.1, font_size='20sp', color=(0.5, 0.6, 0.8, 1)))
         self.p_id = ModernInput(hint_text="ID Karbar", size_hint_y=0.1); l.add_widget(self.p_id)
-        self.reason = ModernInput(hint_text="KHALAF", readonly=True, size_hint_y=0.1); l.add_widget(self.reason)
-        grid = GridLayout(cols=2, spacing=10, size_hint_y=0.3)
-        self.v_list = ["ETLAGH", "USER/NAME", "FAHASHI", "TABANI", "BI EHTARAMI", "RADE SANI"]
-        for v in self.v_list: grid.add_widget(ModernButton(text=v, on_press=lambda x, b=v: setattr(self.reason, 'text', b)))
+        self.sc = BoxLayout(size_hint_y=0.1); self.reason = ModernInput(hint_text="KHALAF", readonly=True, halign='center')
+        self.sc.add_widget(self.reason); l.add_widget(self.sc)
+        grid = GridLayout(cols=2, spacing=10, size_hint_y=0.3); self.v_list = ["ETLAGH", "USER/NAME", "FAHASHI", "TABANI", "BI EHTARAMI", "RADE SANI"]
+        for v in self.v_list: grid.add_widget(ModernButton(text=v, font_size='13sp', on_press=lambda x, b=v: self.set_reason_text(b)))
         l.add_widget(grid)
-        l.add_widget(ModernButton(text="SABT", bg_color=(0.4, 0.25, 0.25, 1), on_press=self.submit))
-        l.add_widget(ModernButton(text="KHOROOJ", on_press=lambda x: setattr(self.manager, 'current', 'login')))
-        self.add_widget(l)
+        acts = GridLayout(cols=1, spacing=10, size_hint_y=0.4)
+        acts.add_widget(ModernButton(text="SABT", bg_color=(0.4, 0.25, 0.25, 1), height=65, on_press=self.submit))
+        row_btns = BoxLayout(spacing=10); row_btns.add_widget(ModernButton(text="GOZARESHAT", on_press=lambda x: setattr(self.manager, 'current', 'status')))
+        row_btns.add_widget(ModernButton(text="BANNED", on_press=lambda x: setattr(self.manager, 'current', 'banned_list')))
+        acts.add_widget(row_btns); l.add_widget(acts); l.add_widget(ModernButton(text="KHOROOJ", bg_color=(0.3, 0.2, 0.2, 1), size_hint_y=0.1, on_press=lambda x: setattr(self.manager, 'current', 'login'))); self.add_widget(l)
+    def set_reason_text(self, text):
+        if hasattr(self.reason, 'text'): self.reason.text = text
     def submit(self, x):
         uid, vt = self.p_id.text.strip(), self.reason.text.strip()
-        if uid and vt:
+        if uid and vt in self.v_list:
             with db_lock:
                 if uid not in DATA["game_db"]: DATA["game_db"][uid] = {v:0 for v in self.v_list}
                 DATA["game_db"][uid][vt] += 1
-            add_log(f"Report: {uid} - {vt}"); save_db(); self.p_id.text = ""; self.reason.text = "SABT SHOD"
+                r_count = DATA["game_db"][uid][vt]
+            add_log(f"Report: {uid} - {vt}")
+            if r_count >= 10:
+                ban_times = {"ETLAGH": 1, "USER/NAME": 1, "FAHASHI": 7, "TABANI": 3, "BI EHTARAMI": 3, "RADE SANI": 3}
+                expiry = time.time() + (ban_times.get(vt, 1) * 86400)
+                with db_lock:
+                    DATA["banned_list"][uid] = {"reason": vt, "date": get_jalali_date(), "expiry": expiry}
+                    DATA["game_db"][uid][vt] = 0
+                save_db(); orig_input = self.reason; self.sc.clear_widgets(); self.reason = BlinkingLabel(text=f"ID {uid} BAN SHOD", bold=True); self.sc.add_widget(self.reason)
+                Clock.schedule_once(lambda dt: self.reset_sc(orig_input), 5)
+            else: save_db(); self.reason.text = "SABT SHOD"; self.p_id.text = ""
+    def reset_sc(self, orig_input, *args):
+        self.sc.clear_widgets(); self.reason = orig_input; self.reason.text = ""; self.sc.add_widget(self.reason)
+    def on_touch_down(self, t):
+        if t.y > self.height * 0.9:
+            now = time.time(); self.taps = self.taps + 1 if now - self.last_tap < 1.5 else 1; self.last_tap = now
+            if self.taps >= 5: self.manager.current = 'admin_verify'; self.taps = 0
+            return True
+        return super().on_touch_down(t)
 class StatusScreen(Screen):
     def on_enter(self): self.refresh()
     def __init__(self, **kw):
@@ -221,21 +245,150 @@ class StatusScreen(Screen):
         for uid, rep in items:
             if not q or q in uid.lower(): self.grid.add_widget(PlayerCard(uid, rep))
 
+class BannedScreen(Screen):
+    def on_enter(self): self.auto_unban(); self.refresh()
+    def auto_unban(self):
+        now, changed = time.time(), False
+        with db_lock:
+            for uid in list(DATA["banned_list"].keys()):
+                if now >= DATA["banned_list"][uid].get("expiry", 0): DATA["banned_list"].pop(uid); changed = True
+        if changed: save_db()
+    def __init__(self, **kw):
+        super().__init__(**kw); l = BoxLayout(orientation='vertical', padding=20, spacing=15)
+        l.add_widget(Label(text="LISTE BANNED", bold=True, size_hint_y=None, height=50, color=(0.8, 0.4, 0.4, 1)))
+        self.key = ModernInput(hint_text="Admin Pass For Unban", password=True, size_hint_y=None, height=60); l.add_widget(self.key)
+        self.scroll = ScrollView(); self.grid = GridLayout(cols=1, spacing=15, size_hint_y=None); self.grid.bind(minimum_height=self.grid.setter('height'))
+        self.scroll.add_widget(self.grid); l.add_widget(self.scroll); l.add_widget(ModernButton(text="BAZGASHT", size_hint_y=None, height=55, on_press=lambda x: setattr(self.manager, 'current', 'entry'))); self.add_widget(l)
+    def refresh(self, *args):
+        self.grid.clear_widgets(); now = time.time()
+        with db_lock: items = list(DATA["banned_list"].items())
+        for uid, info in items:
+            rem = max(0, int((info.get('expiry', 0) - now) / 86400))
+            c = BoxLayout(orientation='vertical', size_hint_y=None, height=120, padding=10)
+            with c.canvas.before: Color(0.2, 0.1, 0.14, 1); rect = RoundedRectangle(pos=c.pos, size=c.size, radius=[12,])
+            c.bind(pos=lambda ins,v,r=rect: setattr(r,'pos',ins.pos), size=lambda ins,v,r=rect: setattr(r,'size',ins.size))
+            c.add_widget(Label(text=f"ID: {uid} ({rem} Days)", bold=True, color=(0.8, 0.6, 0.2, 1)))
+            c.add_widget(Label(text=f"{info.get('reason','')} | {info.get('date','')}", font_size='12sp'))
+            btn = ModernButton(text="UNBAN", size_hint_y=None, height=35, on_press=lambda x, i=uid: self.unb(i)); c.add_widget(btn); self.grid.add_widget(c)
+    def unb(self, uid):
+        if self.key.text == "MAHDI@#25#": 
+            with db_lock: DATA["banned_list"].pop(uid, None)
+            add_log(f"Unbanned {uid}"); save_db(); self.key.text = ""; self.refresh()
+
+class AdminPanel(Screen):
+    def __init__(self, **kw):
+        super().__init__(**kw); main = BoxLayout(orientation='vertical', padding=20, spacing=15)
+        main.add_widget(Label(text="PANELE MODIRIYAT", bold=True, size_hint_y=None, height=70, color=(0.6, 0.7, 0.8, 1), font_size='22sp'))
+        self.tid = ModernInput(hint_text="Target ID", size_hint_y=None, height=65); main.add_widget(self.tid)
+        btn_grid = GridLayout(cols=1, spacing=12)
+        btn_grid.add_widget(ModernButton(text="PAK KARDANE GOZARESH", bg_color=(0.45, 0.25, 0.25, 1), height=65, size_hint_y=None, on_press=self.reset_p))
+        btn_grid.add_widget(ModernButton(text="LOG HAYE SYSTEM", bg_color=(0.25, 0.35, 0.45, 1), height=65, size_hint_y=None, on_press=lambda x: setattr(self.manager, 'current', 'log_screen')))
+        btn_grid.add_widget(ModernButton(text="BAN BE BLACKLIST", bg_color=(0.35, 0.15, 0.15, 1), height=65, size_hint_y=None, on_press=self.ban_p))
+        main.add_widget(btn_grid)
+        nav = GridLayout(cols=2, spacing=12, size_hint_y=None, height=130)
+        nav.add_widget(ModernButton(text="LISTE STAFF", bg_color=(0.2, 0.35, 0.3, 1), on_press=lambda x: setattr(self.manager, 'current', 'staff_list')))
+        nav.add_widget(ModernButton(text="BLACKLIST", bg_color=(0.25, 0.2, 0.2, 1), on_press=lambda x: setattr(self.manager, 'current', 'blacklist')))
+        nav.add_widget(ModernButton(text="KHOROOJ", bg_color=(0.3, 0.2, 0.2, 1), on_press=lambda x: setattr(self.manager, 'current', 'entry')))
+        main.add_widget(nav); self.add_widget(main)
+    def reset_p(self, x):
+        u = self.tid.text.strip()
+        with db_lock:
+            if u in DATA["game_db"]: DATA["game_db"].pop(u)
+        add_log(f"Reset {u}"); save_db(); self.tid.text = "PAK SHOD"
+    def ban_p(self, x):
+        u = self.tid.text.strip()
+        if u:
+            with db_lock:
+                if u not in DATA["blacklist"]: DATA["blacklist"].append(u)
+                DATA["game_db"].pop(u, None)
+            add_log(f"BL {u}"); save_db(); self.tid.text = "BANNED"
+class LogScreen(Screen):
+    def on_enter(self): self.refresh()
+    def __init__(self, **kw):
+        super().__init__(**kw); l = BoxLayout(orientation='vertical', padding=20, spacing=10)
+        l.add_widget(Label(text="FAALIYATE NAZORIN", bold=True, size_hint_y=None, height=50, color=(0.5, 0.6, 0.7, 1)))
+        self.s = ModernInput(hint_text="Search staff or action...", size_hint_y=None, height=60); self.s.bind(text=self.refresh); l.add_widget(self.s)
+        self.scroll = ScrollView(); self.grid = GridLayout(cols=1, spacing=8, size_hint_y=None); self.grid.bind(minimum_height=self.grid.setter('height'))
+        self.scroll.add_widget(self.grid); l.add_widget(self.scroll)
+        btns = BoxLayout(size_hint_y=None, height=60, spacing=10)
+        btns.add_widget(ModernButton(text="PAK KARDAN", bg_color=(0.4, 0.2, 0.2, 1), on_press=self.clear)); btns.add_widget(ModernButton(text="BAZGASHT", on_press=lambda x: setattr(self.manager, 'current', 'admin_panel')))
+        l.add_widget(btns); self.add_widget(l)
+    def refresh(self, *args):
+        q = self.s.text.strip().lower(); self.grid.clear_widgets()
+        with db_lock: logs = list(DATA.get("system_logs", []))
+        for log in logs:
+            if not q or q in f"{log.get('staff','')} {log.get('action','')}".lower(): self.grid.add_widget(LogCard(log))
+    def clear(self, x): 
+        with db_lock: DATA["system_logs"] = []
+        save_db(); self.refresh()
+
+class AdminVerifyScreen(Screen):
+    def __init__(self, **kw):
+        super().__init__(**kw); l = BoxLayout(orientation='vertical', padding=60, spacing=20)
+        l.add_widget(Label(text="TAEEDE MODIRIYAT", bold=True, color=(0.6, 0.7, 0.8, 1))); self.c = ModernInput(hint_text="Master Key", password=True); l.add_widget(self.c)
+        l.add_widget(ModernButton(text="VOROOOD", bg_color=(0.2, 0.3, 0.4, 1), height=65, on_press=self.verify)); self.add_widget(l)
+    def verify(self, x):
+        if self.c.text == "MAHDI@#25#": self.c.text = ""; self.manager.current = 'admin_panel'
+        else: self.manager.current = 'login'
+
+class StaffListScreen(Screen):
+    def on_enter(self): self.refresh()
+    def __init__(self, **kw):
+        super().__init__(**kw); l = BoxLayout(orientation='vertical', padding=20, spacing=15)
+        l.add_widget(Label(text="STAFF LIST & REQS", bold=True, size_hint_y=None, height=50)); self.search = ModernInput(hint_text="Search Staff...", size_hint_y=None, height=60); self.search.bind(text=self.refresh); l.add_widget(self.search)
+        self.scroll = ScrollView(); self.grid = GridLayout(cols=1, spacing=10, size_hint_y=None); self.grid.bind(minimum_height=self.grid.setter('height'))
+        self.scroll.add_widget(self.grid); l.add_widget(self.scroll); l.add_widget(ModernButton(text="BAZGASHT", size_hint_y=None, height=55, on_press=lambda x: setattr(self.manager, 'current', 'admin_panel')))
+        self.add_widget(l)
+    def refresh(self, *args):
+        self.grid.clear_widgets(); q = self.search.text.strip().lower()
+        with db_lock: 
+            preqs = list(DATA.get("pending_requests", {}).items())
+            users = list(DATA.get("users", {}).items())
+        for u, p in preqs:
+            if not q or q in u.lower():
+                row = BoxLayout(size_hint_y=None, height=60, spacing=10); row.add_widget(Label(text=f"REQ: {u}", color=(0.9, 0.7, 0.2, 1)))
+                btn = ModernButton(text="OK", bg_color=(0.2, 0.4, 0.3, 1), on_press=lambda x, u=u, p=p: self.appr(u, p)); row.add_widget(btn); self.grid.add_widget(row)
+        for u, info in users:
+            if u != "admin" and (not q or q in u.lower()):
+                row = BoxLayout(size_hint_y=None, height=60, spacing=10); row.add_widget(Label(text=f"STAFF: {u}", color=(0.4, 0.8, 0.4, 1)))
+                btn = ModernButton(text="Laghv", bg_color=(0.5, 0.2, 0.2, 1), on_press=lambda x, u=u: self.remove_staff(u)); row.add_widget(btn); self.grid.add_widget(row)
+    def appr(self, u, p): 
+        with db_lock: DATA["users"][u] = {"pass": p, "status": "approved"}; DATA["pending_requests"].pop(u, None)
+        add_log(f"Approved {u}"); save_db(); self.refresh()
+    def remove_staff(self, u):
+        with db_lock:
+            if u in DATA["users"]: DATA["users"].pop(u)
+        add_log(f"Removed Staff: {u}"); save_db(); self.refresh()
+
+class BlacklistScreen(Screen):
+    def on_enter(self): self.refresh()
+    def __init__(self, **kw):
+        super().__init__(**kw); l = BoxLayout(orientation='vertical', padding=20, spacing=15)
+        l.add_widget(Label(text="BLACKLIST MANAGEMENT", bold=True, size_hint_y=None, height=50)); self.search = ModernInput(hint_text="Search ID in Blacklist...", size_hint_y=None, height=60); self.search.bind(text=self.refresh); l.add_widget(self.search)
+        self.scroll = ScrollView(); self.grid = GridLayout(cols=1, spacing=10, size_hint_y=None); self.grid.bind(minimum_height=self.grid.setter('height'))
+        self.scroll.add_widget(self.grid); l.add_widget(self.scroll); l.add_widget(ModernButton(text="BAZGASHT", size_hint_y=None, height=55, on_press=lambda x: setattr(self.manager, 'current', 'admin_panel'))); self.add_widget(l)
+    def refresh(self, *args):
+        self.grid.clear_widgets(); q = self.search.text.strip().lower()
+        with db_lock: blist = list(DATA.get("blacklist", []))
+        for uid in blist:
+            if not q or q in uid.lower():
+                row = BoxLayout(size_hint_y=None, height=60, spacing=10); row.add_widget(Label(text=f"BANNED: {uid}"))
+                btn = ModernButton(text="AZAD SAZI", bg_color=(0.2, 0.3, 0.5, 1), on_press=lambda x, u=uid: self.unban(u)); row.add_widget(btn); self.grid.add_widget(row)
+    def unban(self, uid):
+        with db_lock:
+            if uid in DATA["blacklist"]: DATA["blacklist"].remove(uid)
+        add_log(f"Un-Blacklisted: {uid}"); save_db(); self.refresh()
+
 class TeamNezaratApp(App):
     def build(self):
         sm = ScreenManager(transition=NoTransition())
-        # اضافه کردن تمام صفحات به مدیر صفحه
-        sm.add_widget(LoginScreen(name='login'))
-        sm.add_widget(EntryScreen(name='entry'))
-        sm.add_widget(StatusScreen(name='status'))
-        
-        # همگام‌سازی خودکار هر ۶۰ ثانیه
+        scs = [LoginScreen(name='login'), EntryScreen(name='entry'), AdminVerifyScreen(name='admin_verify'), AdminPanel(name='admin_panel'), LogScreen(name='log_screen'), StatusScreen(name='status'), BannedScreen(name='banned_list'), StaffListScreen(name='staff_list'), BlacklistScreen(name='blacklist')]
+        for s in scs: sm.add_widget(s)
+        # سیستم سینک هوشمند هر ۶۰ ثانیه
         Clock.schedule_interval(self.smart_sync, 60)
         return sm
-    
     def smart_sync(self, dt):
         if not _is_syncing: load_db()
 
 if __name__ == '__main__':
     TeamNezaratApp().run()
-
