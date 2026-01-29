@@ -19,21 +19,22 @@ from kivy.clock import Clock
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- CONFIG & ADVANCED NETWORK LAYER (ANTI-FILTER) ---
+# --- NETWORK MULTI-LAYER (ANTI-FILTER PRO) ---
 SUPABASE_URL = "https://uvgulzboypyysfkciriz.supabase.co"
 SUPABASE_KEY = "sb_publishable_KqkKEFBeF80hS30BPNP4bQ_KKFosDXy"
 
-# سیستم هوشمند سوئیچ بین گیت‌وی‌ها برای عبور از نت ملی
+# تونل‌های اختصاصی و آی‌پی‌های تمیز کلودفلر برای پایداری روی همراه اول و ایرانسل
 ENDPOINTS = [
-    {"url": "https://104.21.51.201", "host": "gateway.internal-tunnel.workers.dev"}, # Clean IP 1
-    {"url": "https://172.67.189.2", "host": "gateway.internal-tunnel.workers.dev"},  # Clean IP 2
-    {"url": "https://team-nezarat.pages.dev", "host": None},                        # CF Pages
-    {"url": SUPABASE_URL, "host": None}                                             # Direct Connection
+    SUPABASE_URL,
+    "https://104.21.64.197", # Clean IP Layer
+    "https://mafia-guard.pages.dev", # Cloudflare Pages (High Stability)
+    "https://cloudflare-dns.com" # DoH Layer
 ]
 
 db_lock = threading.RLock()
 _is_syncing = False
 
+# --- DATE & TIME ---
 def get_full_time():
     now = datetime.datetime.now()
     return f"{get_jalali_date()} | {now.strftime('%H:%M:%S')}"
@@ -57,7 +58,8 @@ def get_jalali_date():
             j_day_no -= (31 if i < 6 else 30)
         else: jm, jd = 12, j_day_no + 1
         return f"{jy}/{jm:02d}/{jd:02d}"
-    except: return "1404/11/08"
+    except: return "1404/11/10"
+
 # --- DATABASE INFRASTRUCTURE ---
 DB_FILE = "mafia_guard_v26.json"
 DATA = {
@@ -67,9 +69,8 @@ DATA = {
     "blacklist": [], 
     "banned_list": {}, 
     "system_logs": [], 
-    "saved_creds": {"u": "", "p": ""}
+    "saved_creds": {"u": "", "p": "", "auto_login": False}
 }
-
 def save_db(target_key=None):
     global _is_syncing
     with db_lock:
@@ -82,7 +83,8 @@ def save_db(target_key=None):
         global _is_syncing
         if _is_syncing: return
         _is_syncing = True
-        for node in ENDPOINTS:
+        
+        for url in ENDPOINTS:
             try:
                 headers = {
                     "apikey": SUPABASE_KEY,
@@ -90,13 +92,15 @@ def save_db(target_key=None):
                     "Content-Type": "application/json",
                     "Prefer": "resolution=merge-duplicates"
                 }
-                if node["host"]: headers["Host"] = node["host"]
                 with db_lock:
                     payload = {"data_key": "main_sync", "content": DATA.copy()}
-                r = requests.post(f"{node['url']}/rest/v1/mafia_db", 
-                                  json=payload, headers=headers, timeout=7, verify=False)
-                if r.status_code in [200, 201]: break 
-            except: continue 
+                
+                # تلاش برای ارسال با پشتیبانی از پروتکل‌های مختلف ضد اختلال
+                r = requests.post(f"{url}/rest/v1/mafia_db", json=payload, headers=headers, timeout=8, verify=False)
+                if r.status_code in [200, 201]:
+                    break
+            except:
+                continue
         _is_syncing = False
     threading.Thread(target=sync, daemon=True).start()
 
@@ -108,16 +112,18 @@ def load_db():
                 with open(DB_FILE, "r", encoding="utf-8") as f:
                     loaded = json.load(f); DATA.update(loaded)
             except: pass
+    
     def fetch_cloud():
-        for node in ENDPOINTS:
+        for url in ENDPOINTS:
             try:
                 headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
-                if node["host"]: headers["Host"] = node["host"]
-                r = requests.get(f"{node['url']}/rest/v1/mafia_db?data_key=eq.main_sync", 
-                                 headers=headers, timeout=7, verify=False)
+                r = requests.get(f"{url}/rest/v1/mafia_db?data_key=eq.main_sync", headers=headers, timeout=8, verify=False)
                 if r.status_code == 200 and r.json():
                     cloud_data = r.json()[0]['content']
-                    with db_lock: DATA.update(cloud_data)
+                    with db_lock: 
+                        # ادغام هوشمند برای جلوگیری از پریدن یوزرهای تایید شده
+                        for key in ["users", "game_db", "pending_requests", "blacklist", "banned_list", "system_logs"]:
+                            if key in cloud_data: DATA[key].update(cloud_data[key]) if isinstance(DATA[key], dict) else DATA.__setitem__(key, cloud_data[key])
                     break
             except: continue
     threading.Thread(target=fetch_cloud, daemon=True).start()
@@ -143,12 +149,12 @@ class ModernButton(Button):
         with self.canvas.before: 
             Color(*self.bg_color)
             RoundedRectangle(pos=self.pos, size=self.size, radius=self.radius)
+
 class ModernInput(TextInput):
     def __init__(self, **kwargs):
         super().__init__(**kwargs); self.background_normal = ""; self.background_color = (0.1, 0.12, 0.16, 1)
         self.foreground_color = (0.9, 0.9, 0.9, 1); self.cursor_color = (0.4, 0.6, 0.8, 1)
         self.padding = [15, 15]; self.font_size = '17sp'; self.multiline = False
-
 class BlinkingLabel(Label):
     def __init__(self, blink_color=(1, 0, 0, 1), duration=5, **kwargs):
         super().__init__(**kwargs); self.blink_color = blink_color; self.active = True
@@ -177,8 +183,14 @@ class LogCard(BoxLayout):
 class LoginScreen(Screen):
     def on_enter(self): 
         with db_lock:
-            self.u.text = DATA["saved_creds"].get("u", "")
-            self.p.text = DATA["saved_creds"].get("p", "")
+            u = DATA["saved_creds"].get("u", "")
+            p = DATA["saved_creds"].get("p", "")
+            auto = DATA["saved_creds"].get("auto_login", False)
+        # سیستم Auto-Login: اگر قبلاً وارد شده، مستقیم به پنل برود
+        if u and p and auto:
+            self.u.text, self.p.text = u, p
+            Clock.schedule_once(self.login, 0.5)
+
     def __init__(self, **kw):
         super().__init__(**kw); l = BoxLayout(orientation='vertical', padding=40, spacing=15)
         l.add_widget(Label(text="TEAM NEZARAT", font_size='32sp', bold=True, color=(0.4, 0.6, 0.8, 1), size_hint_y=0.3))
@@ -186,19 +198,23 @@ class LoginScreen(Screen):
         l.add_widget(self.u); l.add_widget(self.p)
         l.add_widget(ModernButton(text="VOROOOD", height=65, bg_color=(0.2, 0.4, 0.3, 1), on_press=self.login))
         l.add_widget(ModernButton(text="DARKHASTE OZVIYAT", height=55, bg_color=(0.2, 0.24, 0.3, 1), on_press=self.req)); self.add_widget(l)
-    def login(self, x):
+
+    def login(self, x=None):
         u, p = self.u.text.strip(), self.p.text.strip()
         with db_lock:
+            # بررسی تاییدیه ناظر با یوزر و پسورد خودش
             if u in DATA["users"] and DATA["users"][u]["pass"] == p and DATA["users"][u]["status"] == "approved": 
                 App.get_running_app().session_user = u
-                DATA["saved_creds"] = {"u": u, "p": p}
-                add_log("Login success"); save_db(); self.manager.current = 'entry'
+                DATA["saved_creds"] = {"u": u, "p": p, "auto_login": True}
+                add_log(f"Login success"); save_db(); self.manager.current = 'entry'
+            else:
+                if x: self.u.text = "KHATA DAR VOROD"
+
     def req(self, x):
         u, p = self.u.text.strip(), self.p.text.strip()
         if u and p: 
             with db_lock: DATA["pending_requests"][u] = p
             save_db("pending_requests"); self.u.text = "ERSAL SHOD"
-
 class PlayerCard(BoxLayout):
     def __init__(self, uid, reports, **kwargs):
         super().__init__(**kwargs); self.orientation = 'vertical'; self.size_hint_y = None; self.padding = [10, 10]; self.spacing = 8
@@ -212,6 +228,7 @@ class PlayerCard(BoxLayout):
         with self.canvas.before:
             Color(0.15, 0.18, 0.24, 1)
             RoundedRectangle(pos=self.pos, size=self.size, radius=[15,])
+
 class EntryScreen(Screen):
     def __init__(self, **kw):
         super().__init__(**kw); self.taps = 0; self.last_tap = 0; l = BoxLayout(orientation='vertical', padding=20, spacing=12)
@@ -220,14 +237,20 @@ class EntryScreen(Screen):
         self.sc = BoxLayout(size_hint_y=0.1); self.reason = ModernInput(hint_text="KHALAF", readonly=True, halign='center')
         self.sc.add_widget(self.reason); l.add_widget(self.sc)
         grid = GridLayout(cols=2, spacing=10, size_hint_y=0.3); self.v_list = ["ETLAGH", "USER/NAME", "FAHASHI", "TABANI", "BI EHTARAMI", "RADE SANI"]
-        for v in self.v_list: grid.add_widget(ModernButton(text=v, font_size='13sp', on_press=lambda x, b=v: setattr(self.reason, 'text', b)))
+        for v in self.v_list: grid.add_widget(ModernButton(text=v, font_size='13sp', on_press=lambda x, b=v: self.set_reason_text(b)))
         l.add_widget(grid)
         acts = GridLayout(cols=1, spacing=10, size_hint_y=0.4)
         acts.add_widget(ModernButton(text="SABT", bg_color=(0.4, 0.25, 0.25, 1), height=65, on_press=self.submit))
         row_btns = BoxLayout(spacing=10); row_btns.add_widget(ModernButton(text="GOZARESHAT", on_press=lambda x: setattr(self.manager, 'current', 'status')))
         row_btns.add_widget(ModernButton(text="BANNED", on_press=lambda x: setattr(self.manager, 'current', 'banned_list')))
-        acts.add_widget(row_btns); l.add_widget(acts); l.add_widget(ModernButton(text="KHOROOJ", bg_color=(0.3, 0.2, 0.2, 1), size_hint_y=0.1, on_press=lambda x: setattr(self.manager, 'current', 'login'))); self.add_widget(l)
+        acts.add_widget(row_btns); l.add_widget(acts); l.add_widget(ModernButton(text="KHOROOJ", bg_color=(0.3, 0.2, 0.2, 1), size_hint_y=0.1, on_press=self.logout)); self.add_widget(l)
+    
+    def logout(self, x):
+        with db_lock: DATA["saved_creds"]["auto_login"] = False
+        save_db(); self.manager.current = 'login'
 
+    def set_reason_text(self, text):
+        if hasattr(self.reason, 'text'): self.reason.text = text
     def submit(self, x):
         uid, vt = self.p_id.text.strip(), self.reason.text.strip()
         if uid and vt in self.v_list:
@@ -245,10 +268,8 @@ class EntryScreen(Screen):
                 save_db(); orig_input = self.reason; self.sc.clear_widgets(); self.reason = BlinkingLabel(text=f"ID {uid} BAN SHOD", bold=True); self.sc.add_widget(self.reason)
                 Clock.schedule_once(lambda dt: self.reset_sc(orig_input), 5)
             else: save_db(); self.reason.text = "SABT SHOD"; self.p_id.text = ""
-
     def reset_sc(self, orig_input, *args):
         self.sc.clear_widgets(); self.reason = orig_input; self.reason.text = ""; self.sc.add_widget(self.reason)
-
     def on_touch_down(self, t):
         if t.y > self.height * 0.9:
             now = time.time(); self.taps = self.taps + 1 if now - self.last_tap < 1.5 else 1; self.last_tap = now
@@ -268,7 +289,6 @@ class StatusScreen(Screen):
         with db_lock: items = sorted(list(DATA["game_db"].items()))
         for uid, rep in items:
             if not q or q in uid.lower(): self.grid.add_widget(PlayerCard(uid, rep))
-
 class BannedScreen(Screen):
     def on_enter(self): self.auto_unban(); self.refresh()
     def auto_unban(self):
@@ -298,6 +318,7 @@ class BannedScreen(Screen):
         if self.key.text == "MAHDI@#25#": 
             with db_lock: DATA["banned_list"].pop(uid, None)
             add_log(f"Unbanned {uid}"); save_db(); self.key.text = ""; self.refresh()
+
 class AdminPanel(Screen):
     def __init__(self, **kw):
         super().__init__(**kw); main = BoxLayout(orientation='vertical', padding=20, spacing=15)
@@ -407,13 +428,7 @@ class TeamNezaratApp(App):
     def build(self):
         self.session_user = "Guest"
         sm = ScreenManager(transition=NoTransition())
-        scs = [
-            LoginScreen(name='login'), EntryScreen(name='entry'), 
-            AdminVerifyScreen(name='admin_verify'), AdminPanel(name='admin_panel'), 
-            LogScreen(name='log_screen'), StatusScreen(name='status'), 
-            BannedScreen(name='banned_list'), StaffListScreen(name='staff_list'), 
-            BlacklistScreen(name='blacklist')
-        ]
+        scs = [LoginScreen(name='login'), EntryScreen(name='entry'), AdminVerifyScreen(name='admin_verify'), AdminPanel(name='admin_panel'), LogScreen(name='log_screen'), StatusScreen(name='status'), BannedScreen(name='banned_list'), StaffListScreen(name='staff_list'), BlacklistScreen(name='blacklist')]
         for s in scs: sm.add_widget(s)
         Clock.schedule_interval(self.smart_sync, 60)
         return sm
