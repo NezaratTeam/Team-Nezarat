@@ -19,21 +19,21 @@ from kivy.clock import Clock
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- NETWORK MULTI-LAYER (ANTI-FILTER) ---
+# --- CONFIG & ADVANCED NETWORK LAYER (ANTI-FILTER) ---
 SUPABASE_URL = "https://uvgulzboypyysfkciriz.supabase.co"
 SUPABASE_KEY = "sb_publishable_KqkKEFBeF80hS30BPNP4bQ_KKFosDXy"
 
-# لیست آدرس‌های جایگزین (تونل‌های Cloudflare Worker برای عبور از نت ملی)
+# سیستم هوشمند سوئیچ بین گیت‌وی‌ها برای عبور از نت ملی
 ENDPOINTS = [
-    SUPABASE_URL,
-    "https://gateway.internal-tunnel.workers.dev", # لایه دوم (تونل)
-    "https://1.1.1.1" # لایه سوم (DOH)
+    {"url": "https://104.21.51.201", "host": "gateway.internal-tunnel.workers.dev"}, # Clean IP 1
+    {"url": "https://172.67.189.2", "host": "gateway.internal-tunnel.workers.dev"},  # Clean IP 2
+    {"url": "https://team-nezarat.pages.dev", "host": None},                        # CF Pages
+    {"url": SUPABASE_URL, "host": None}                                             # Direct Connection
 ]
 
 db_lock = threading.RLock()
 _is_syncing = False
 
-# --- DATE & TIME ---
 def get_full_time():
     now = datetime.datetime.now()
     return f"{get_jalali_date()} | {now.strftime('%H:%M:%S')}"
@@ -60,7 +60,6 @@ def get_jalali_date():
     except: return "1404/11/08"
 # --- DATABASE INFRASTRUCTURE ---
 DB_FILE = "mafia_guard_v26.json"
-# حذف last_user برای جلوگیری از باگ ادمین
 DATA = {
     "users": {"admin": {"pass": "MAHDI@#25#", "status": "approved"}}, 
     "game_db": {}, 
@@ -83,9 +82,7 @@ def save_db(target_key=None):
         global _is_syncing
         if _is_syncing: return
         _is_syncing = True
-        
-        # لایه‌بندی برای عبور از فیلترینگ/نت ملی
-        for url in ENDPOINTS:
+        for node in ENDPOINTS:
             try:
                 headers = {
                     "apikey": SUPABASE_KEY,
@@ -93,15 +90,13 @@ def save_db(target_key=None):
                     "Content-Type": "application/json",
                     "Prefer": "resolution=merge-duplicates"
                 }
+                if node["host"]: headers["Host"] = node["host"]
                 with db_lock:
                     payload = {"data_key": "main_sync", "content": DATA.copy()}
-                
-                # ارسال به سوبابیس یا تونل واسط
-                r = requests.post(f"{url}/rest/v1/mafia_db", json=payload, headers=headers, timeout=10)
-                if r.status_code in [200, 201]:
-                    break # اگر با موفقیت فرستاد، از حلقه خارج شو
-            except:
-                continue # اگر خطا داد (نت ملی)، برو سراغ تونل بعدی
+                r = requests.post(f"{node['url']}/rest/v1/mafia_db", 
+                                  json=payload, headers=headers, timeout=7, verify=False)
+                if r.status_code in [200, 201]: break 
+            except: continue 
         _is_syncing = False
     threading.Thread(target=sync, daemon=True).start()
 
@@ -113,12 +108,13 @@ def load_db():
                 with open(DB_FILE, "r", encoding="utf-8") as f:
                     loaded = json.load(f); DATA.update(loaded)
             except: pass
-    
     def fetch_cloud():
-        for url in ENDPOINTS:
+        for node in ENDPOINTS:
             try:
                 headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
-                r = requests.get(f"{url}/rest/v1/mafia_db?data_key=eq.main_sync", headers=headers, timeout=10)
+                if node["host"]: headers["Host"] = node["host"]
+                r = requests.get(f"{node['url']}/rest/v1/mafia_db?data_key=eq.main_sync", 
+                                 headers=headers, timeout=7, verify=False)
                 if r.status_code == 200 and r.json():
                     cloud_data = r.json()[0]['content']
                     with db_lock: DATA.update(cloud_data)
@@ -129,7 +125,6 @@ def load_db():
 def add_log(msg):
     with db_lock:
         if "system_logs" not in DATA: DATA["system_logs"] = []
-        # گرفتن یوزر از اپلیکیشن به جای دیتابیس برای حل باگ ادمین
         app = App.get_running_app()
         current_staff = getattr(app, 'session_user', 'System')
         new_entry = {"time": get_full_time(), "staff": str(current_staff), "action": str(msg)}
@@ -138,6 +133,7 @@ def add_log(msg):
     save_db("system_logs")
 
 load_db()
+
 class ModernButton(Button):
     def __init__(self, bg_color=(0.18, 0.22, 0.3, 1), radius=[12,], **kwargs):
         super().__init__(**kwargs); self.background_normal = ""; self.background_color = (0,0,0,0)
@@ -147,7 +143,6 @@ class ModernButton(Button):
         with self.canvas.before: 
             Color(*self.bg_color)
             RoundedRectangle(pos=self.pos, size=self.size, radius=self.radius)
-
 class ModernInput(TextInput):
     def __init__(self, **kwargs):
         super().__init__(**kwargs); self.background_normal = ""; self.background_color = (0.1, 0.12, 0.16, 1)
@@ -195,15 +190,15 @@ class LoginScreen(Screen):
         u, p = self.u.text.strip(), self.p.text.strip()
         with db_lock:
             if u in DATA["users"] and DATA["users"][u]["pass"] == p and DATA["users"][u]["status"] == "approved": 
-                # تغییر اصلی: یوزر رو در حافظه موقت اپ ذخیره می‌کنیم
                 App.get_running_app().session_user = u
                 DATA["saved_creds"] = {"u": u, "p": p}
-                add_log(f"Login success"); save_db(); self.manager.current = 'entry'
+                add_log("Login success"); save_db(); self.manager.current = 'entry'
     def req(self, x):
         u, p = self.u.text.strip(), self.p.text.strip()
         if u and p: 
             with db_lock: DATA["pending_requests"][u] = p
             save_db("pending_requests"); self.u.text = "ERSAL SHOD"
+
 class PlayerCard(BoxLayout):
     def __init__(self, uid, reports, **kwargs):
         super().__init__(**kwargs); self.orientation = 'vertical'; self.size_hint_y = None; self.padding = [10, 10]; self.spacing = 8
@@ -217,7 +212,6 @@ class PlayerCard(BoxLayout):
         with self.canvas.before:
             Color(0.15, 0.18, 0.24, 1)
             RoundedRectangle(pos=self.pos, size=self.size, radius=[15,])
-
 class EntryScreen(Screen):
     def __init__(self, **kw):
         super().__init__(**kw); self.taps = 0; self.last_tap = 0; l = BoxLayout(orientation='vertical', padding=20, spacing=12)
@@ -226,15 +220,14 @@ class EntryScreen(Screen):
         self.sc = BoxLayout(size_hint_y=0.1); self.reason = ModernInput(hint_text="KHALAF", readonly=True, halign='center')
         self.sc.add_widget(self.reason); l.add_widget(self.sc)
         grid = GridLayout(cols=2, spacing=10, size_hint_y=0.3); self.v_list = ["ETLAGH", "USER/NAME", "FAHASHI", "TABANI", "BI EHTARAMI", "RADE SANI"]
-        for v in self.v_list: grid.add_widget(ModernButton(text=v, font_size='13sp', on_press=lambda x, b=v: self.set_reason_text(b)))
+        for v in self.v_list: grid.add_widget(ModernButton(text=v, font_size='13sp', on_press=lambda x, b=v: setattr(self.reason, 'text', b)))
         l.add_widget(grid)
         acts = GridLayout(cols=1, spacing=10, size_hint_y=0.4)
         acts.add_widget(ModernButton(text="SABT", bg_color=(0.4, 0.25, 0.25, 1), height=65, on_press=self.submit))
         row_btns = BoxLayout(spacing=10); row_btns.add_widget(ModernButton(text="GOZARESHAT", on_press=lambda x: setattr(self.manager, 'current', 'status')))
         row_btns.add_widget(ModernButton(text="BANNED", on_press=lambda x: setattr(self.manager, 'current', 'banned_list')))
         acts.add_widget(row_btns); l.add_widget(acts); l.add_widget(ModernButton(text="KHOROOJ", bg_color=(0.3, 0.2, 0.2, 1), size_hint_y=0.1, on_press=lambda x: setattr(self.manager, 'current', 'login'))); self.add_widget(l)
-    def set_reason_text(self, text):
-        if hasattr(self.reason, 'text'): self.reason.text = text
+
     def submit(self, x):
         uid, vt = self.p_id.text.strip(), self.reason.text.strip()
         if uid and vt in self.v_list:
@@ -242,7 +235,6 @@ class EntryScreen(Screen):
                 if uid not in DATA["game_db"]: DATA["game_db"][uid] = {v:0 for v in self.v_list}
                 DATA["game_db"][uid][vt] += 1
                 r_count = DATA["game_db"][uid][vt]
-            # اینجا یوزر لاگین شده به صورت خودکار شناسایی و در لاگ ثبت میشه
             add_log(f"Report: {uid} - {vt}")
             if r_count >= 10:
                 ban_times = {"ETLAGH": 1, "USER/NAME": 1, "FAHASHI": 7, "TABANI": 3, "BI EHTARAMI": 3, "RADE SANI": 3}
@@ -253,8 +245,10 @@ class EntryScreen(Screen):
                 save_db(); orig_input = self.reason; self.sc.clear_widgets(); self.reason = BlinkingLabel(text=f"ID {uid} BAN SHOD", bold=True); self.sc.add_widget(self.reason)
                 Clock.schedule_once(lambda dt: self.reset_sc(orig_input), 5)
             else: save_db(); self.reason.text = "SABT SHOD"; self.p_id.text = ""
+
     def reset_sc(self, orig_input, *args):
         self.sc.clear_widgets(); self.reason = orig_input; self.reason.text = ""; self.sc.add_widget(self.reason)
+
     def on_touch_down(self, t):
         if t.y > self.height * 0.9:
             now = time.time(); self.taps = self.taps + 1 if now - self.last_tap < 1.5 else 1; self.last_tap = now
@@ -411,10 +405,15 @@ class BlacklistScreen(Screen):
 
 class TeamNezaratApp(App):
     def build(self):
-        # تعریف متغیر اختصاصی برای حل باگ ادمین
         self.session_user = "Guest"
         sm = ScreenManager(transition=NoTransition())
-        scs = [LoginScreen(name='login'), EntryScreen(name='entry'), AdminVerifyScreen(name='admin_verify'), AdminPanel(name='admin_panel'), LogScreen(name='log_screen'), StatusScreen(name='status'), BannedScreen(name='banned_list'), StaffListScreen(name='staff_list'), BlacklistScreen(name='blacklist')]
+        scs = [
+            LoginScreen(name='login'), EntryScreen(name='entry'), 
+            AdminVerifyScreen(name='admin_verify'), AdminPanel(name='admin_panel'), 
+            LogScreen(name='log_screen'), StatusScreen(name='status'), 
+            BannedScreen(name='banned_list'), StaffListScreen(name='staff_list'), 
+            BlacklistScreen(name='blacklist')
+        ]
         for s in scs: sm.add_widget(s)
         Clock.schedule_interval(self.smart_sync, 60)
         return sm
