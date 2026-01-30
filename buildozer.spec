@@ -15,7 +15,7 @@ source.dir = .
 source.include_exts = py,png,jpg,json,kv
 
 # (str) Application versioning
-version = 0.1
+version = 0.2
 
 # (list) Application requirements
 # قفل کردن نسخه‌ها برای پایداری در محیط گیت‌هاب
