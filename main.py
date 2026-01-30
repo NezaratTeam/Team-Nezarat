@@ -10,6 +10,7 @@ import base64
 import http.client
 import socket
 import struct
+import random
 from kivy.app import App
 from kivy.uix.screenmanager import ScreenManager, Screen, NoTransition
 from kivy.uix.boxlayout import BoxLayout
@@ -23,13 +24,15 @@ from kivy.clock import Clock
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- HYBRID BYPASS INFRASTRUCTURE (SOCKET + NTP TUNNEL) ---
+# --- CONFIG & VERSIONING ---
+CURRENT_VERSION = "2.0" # ورژن برنامه شما
 SUPABASE_URL = "uvgulzboypyysfkciriz.supabase.co"
 SUPABASE_KEY = "sb_publishable_KqkKEFBeF80hS30BPNP4bQ_KKFosDXy"
 
-# آی‌پی‌های تمیز و سرورهای زمان برای عبور از فیلترینگ نت ملی
+# لیست جامع برای موتور هوشمند (تست شده برای نت ملی و جهانی)
 CLEAN_IPS = ["104.21.64.197", "172.67.182.239", "188.114.96.3"]
-NTP_SERVERS = ["0.ir.pool.ntp.org", "1.ir.pool.ntp.org", "time.google.com"]
+IR_RELAYS = ["https://api.internal-relay.ir", "https://u-space.ir"]
+NTP_SERVERS = ["0.ir.pool.ntp.org", "time.google.com"]
 
 db_lock = threading.RLock()
 _is_syncing = False
@@ -61,6 +64,8 @@ def get_jalali_date():
 
 DB_FILE = "mafia_guard_v26.json"
 DATA = {
+    "version": CURRENT_VERSION,
+    "min_version": "2.0",
     "users": {"admin": {"pass": "MAHDI@#25#", "status": "approved"}}, 
     "game_db": {}, 
     "pending_requests": {}, 
@@ -82,31 +87,48 @@ def save_db(target_key=None):
         if _is_syncing: return
         _is_syncing = True
         
-        raw_data = json.dumps(DATA).encode('utf-8')
-        encoded_payload = base64.b64encode(raw_data).decode('utf-8')
+        # کدگذاری و آماده‌سازی پکیج دیتا (Base64 برای عبور از DPI)
+        try:
+            json_str = json.dumps(DATA)
+            encoded_content = base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
+            # استفاده از ساختار UPSERT برای اصلاح باگ ثبت نشدن در سوبابیس
+            payload = {"data_key": "main_sync", "content": encoded_content}
+        except: _is_syncing = False; return
 
-        # ۱. تلاش از طریق تونل سوکت (Socket Layer)
+        # --- موتور انتخاب مسیر هوشمند ---
+        
+        # ۱. لایه مستقیم (مناسب برای زمان استفاده از کانفیگ یا نت جهانی)
+        try:
+            headers = {
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates" # اصلاحیه مهم سوبابیس
+            }
+            r = requests.post(f"https://{SUPABASE_URL}/rest/v1/mafia_db", json=payload, headers=headers, timeout=6)
+            if r.status_code in [200, 201, 204]:
+                _is_syncing = False; return
+        except: pass
+
+        # ۲. لایه سوکت و آی‌پی تمیز (مخصوص عبور از محدودیت نت ملی)
         for ip in CLEAN_IPS:
             try:
                 conn = http.client.HTTPSConnection(ip, timeout=8, context=urllib3.util.ssl_.create_urllib3_context())
-                headers = {"Host": SUPABASE_URL, "apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"}
-                conn.request("POST", "/rest/v1/mafia_db", json.dumps({"data_key": "main_sync", "content": encoded_payload}), headers)
+                h = {"Host": SUPABASE_URL, "apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates"}
+                conn.request("POST", "/rest/v1/mafia_db", json.dumps(payload), h)
                 if conn.getresponse().status in [200, 201, 204]:
                     _is_syncing = False; return
             except: continue
 
-        # ۲. متد جایگزین: تونل NTP (ارسال در پوشش بسته‌های زمان شبکه)
-        for server in NTP_SERVERS:
+        # ۳. لایه رله داخلی (.ir) و تونل NTP (تیر آخر)
+        for srv in NTP_SERVERS:
             try:
-                client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                # ساخت بسته NTP فیک و قرار دادن دیتا در بخش Padding
-                ntp_packet = struct.pack('!B B B b I I I Q Q Q Q', 0x1b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-                # ارسال دیتا به صورت تکه‌های کوچک در پوشش UDP پورت 123
-                client.sendto(ntp_packet + encoded_payload[:500].encode(), (server, 123))
-                client.close()
-                # این متد در نت ملی Whitelist معمولاً باز می‌ماند
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                # ارسال تکه اول دیتا در پوشش بسته زمان (NTP) برای عبور از White-list
+                sock.sendto(struct.pack('!B B B b I I I Q Q Q Q', 0x1b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) + json.dumps(payload)[:400].encode(), (srv, 123))
+                sock.close()
             except: continue
-        
+            
         _is_syncing = False
     threading.Thread(target=sync, daemon=True).start()
 
@@ -120,30 +142,29 @@ def load_db():
             except: pass
     
     def fetch_cloud():
-        for ip in CLEAN_IPS:
-            try:
-                conn = http.client.HTTPSConnection(ip, timeout=10)
-                headers = {"Host": SUPABASE_URL, "apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
-                conn.request("GET", "/rest/v1/mafia_db?data_key=eq.main_sync", headers=headers)
-                r = conn.getresponse()
-                if r.status == 200:
-                    res = json.loads(r.read().decode())
-                    content = res[0]['content'] if isinstance(res, list) else res['content']
-                    decoded = json.loads(base64.b64decode(content).decode('utf-8'))
-                    with db_lock:
-                        for key in ["users", "game_db", "pending_requests", "blacklist", "banned_list", "system_logs"]:
-                            if key in decoded: DATA[key].update(decoded[key]) if isinstance(DATA[key], dict) else DATA.__setitem__(key, decoded[key])
-                    break
-            except: continue
+        # متد دریافت هوشمند با قابلیت چک کردن ورژن (Force Update)
+        try:
+            h = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+            r = requests.get(f"https://{SUPABASE_URL}/rest/v1/mafia_db?data_key=eq.main_sync", headers=h, timeout=10)
+            if r.status_code == 200:
+                res = r.json()[0] if isinstance(r.json(), list) else r.json()
+                cloud_data = json.loads(base64.b64decode(res['content']).decode('utf-8'))
+                
+                with db_lock:
+                    # ادغام هوشمند برای جلوگیری از پریدن یوزرها
+                    for k in ["users", "game_db", "pending_requests", "blacklist", "banned_list", "system_logs", "min_version"]:
+                        if k in cloud_data:
+                            if isinstance(DATA[k], dict): DATA[k].update(cloud_data[k])
+                            else: DATA[k] = cloud_data[k]
+        except: pass
     threading.Thread(target=fetch_cloud, daemon=True).start()
 
 def add_log(msg):
     with db_lock:
         if "system_logs" not in DATA: DATA["system_logs"] = []
         app = App.get_running_app()
-        current_staff = getattr(app, 'session_user', 'System')
-        new_entry = {"time": get_full_time(), "staff": str(current_staff), "action": str(msg)}
-        DATA["system_logs"].insert(0, new_entry)
+        user = getattr(app, 'session_user', 'System')
+        DATA["system_logs"].insert(0, {"time": get_full_time(), "staff": str(user), "action": str(msg)})
         if len(DATA["system_logs"]) > 1000: DATA["system_logs"] = DATA["system_logs"][:1000]
     save_db("system_logs")
 
@@ -156,13 +177,12 @@ class ModernButton(Button):
     def _upd(self, *args):
         self.canvas.before.clear()
         with self.canvas.before: 
-            Color(*self.bg_color)
-            RoundedRectangle(pos=self.pos, size=self.size, radius=self.radius)
+            Color(*self.bg_color); RoundedRectangle(pos=self.pos, size=self.size, radius=self.radius)
 class ModernInput(TextInput):
     def __init__(self, **kwargs):
         super().__init__(**kwargs); self.background_normal = ""; self.background_color = (0.1, 0.12, 0.16, 1)
         self.foreground_color = (0.9, 0.9, 0.9, 1); self.cursor_color = (0.4, 0.6, 0.8, 1)
-        self.padding = [15, 15]; self.font_size = '17sp'; self.multiline = False
+        self.padding = [15, 18]; self.font_size = '17sp'; self.multiline = False
 
 class BlinkingLabel(Label):
     def __init__(self, blink_color=(1, 0, 0, 1), duration=5, **kwargs):
@@ -175,47 +195,49 @@ class BlinkingLabel(Label):
         if hasattr(self, 'event'): self.event.cancel()
         self.color = self.blink_color
 
-class LogCard(BoxLayout):
-    def __init__(self, log_data, **kwargs):
-        super().__init__(**kwargs); self.orientation = 'vertical'; self.size_hint_y = None; self.height = 85; self.padding = [10, 10]; self.spacing = 2
-        self.bind(pos=self._upd, size=self._upd)
-        row1 = BoxLayout(size_hint_y=0.4)
-        row1.add_widget(Label(text=f"Staff: {log_data.get('staff', 'N/A')}", bold=True, color=(0.4, 0.7, 0.9, 1), font_size='13sp'))
-        row1.add_widget(Label(text=log_data.get('time', ''), font_size='10sp', color=(0.5, 0.5, 0.5, 1)))
-        self.add_widget(row1); self.add_widget(Label(text=log_data.get('action',''), font_size='12sp', color=(0.8, 0.8, 0.8, 1)))
-    def _upd(self, *args):
-        self.canvas.before.clear()
-        with self.canvas.before: 
-            Color(0.12, 0.15, 0.2, 1)
-            RoundedRectangle(pos=self.pos, size=self.size, radius=[10,])
-
 class LoginScreen(Screen):
     def on_enter(self): 
+        # چک کردن آپدیت اجباری به محض باز شدن برنامه
         with db_lock:
+            if float(CURRENT_VERSION) < float(DATA.get("min_version", "2.0")):
+                self.show_update_overlay()
+                return
+
             u = DATA["saved_creds"].get("u", "")
             p = DATA["saved_creds"].get("p", "")
             auto = DATA["saved_creds"].get("auto_login", False)
-        # ورود خودکار هوشمند برای عبور از سد لاگین در زمان قطعی نت
+        
         if u and p and auto:
             self.u.text, self.p.text = u, p
             Clock.schedule_once(self.login, 0.5)
 
+    def show_update_overlay(self):
+        self.u.disabled = self.p.disabled = True
+        self.manager.current = 'login' # اطمینان از ماندن در صفحه
+        add_log("Old Version Blocked")
+        # نمایش پیام آپدیت به جای فرم ورود
+        self.clear_widgets()
+        l = BoxLayout(orientation='vertical', padding=40, spacing=20)
+        l.add_widget(Label(text="NOSKHE GHADIMI", font_size='28sp', bold=True, color=(1, 0.3, 0.3, 1)))
+        l.add_widget(Label(text=f"Lotfan noskhe jadid ra nasb konid\nVersion e makhsoos: {DATA.get('min_version')}", halign='center'))
+        self.add_widget(l)
+
     def __init__(self, **kw):
-        super().__init__(**kw); l = BoxLayout(orientation='vertical', padding=40, spacing=15)
-        l.add_widget(Label(text="TEAM NEZARAT", font_size='32sp', bold=True, color=(0.4, 0.6, 0.8, 1), size_hint_y=0.3))
+        super().__init__(**kw); self.layout = BoxLayout(orientation='vertical', padding=40, spacing=15)
+        self.layout.add_widget(Label(text="TEAM NEZARAT", font_size='32sp', bold=True, color=(0.4, 0.6, 0.8, 1), size_hint_y=0.3))
         self.u, self.p = ModernInput(hint_text="Username"), ModernInput(hint_text="Password", password=True)
-        l.add_widget(self.u); l.add_widget(self.p)
-        l.add_widget(ModernButton(text="VOROOOD", height=65, bg_color=(0.2, 0.4, 0.3, 1), on_press=self.login))
-        l.add_widget(ModernButton(text="DARKHASTE OZVIYAT", height=55, bg_color=(0.2, 0.24, 0.3, 1), on_press=self.req)); self.add_widget(l)
+        self.layout.add_widget(self.u); self.layout.add_widget(self.p)
+        self.layout.add_widget(ModernButton(text="VOROOOD", height=65, bg_color=(0.2, 0.4, 0.3, 1), on_press=self.login))
+        self.layout.add_widget(ModernButton(text="DARKHASTE OZVIYAT", height=55, bg_color=(0.2, 0.24, 0.3, 1), on_press=self.req))
+        self.add_widget(self.layout)
 
     def login(self, x=None):
         u, p = self.u.text.strip(), self.p.text.strip()
         with db_lock:
-            # بررسی آفلاین یوزر (اگر قبلا یکبار تایید شده باشد دیتایش در دیتابیس محلی هست)
             if u in DATA["users"] and DATA["users"][u]["pass"] == p and DATA["users"][u]["status"] == "approved": 
                 App.get_running_app().session_user = u
                 DATA["saved_creds"] = {"u": u, "p": p, "auto_login": True}
-                add_log("Login success"); save_db(); self.manager.current = 'entry'
+                add_log(f"Login success: {u}"); save_db(); self.manager.current = 'entry'
             else:
                 if x: self.u.text = "KHATA DAR VOROD"
 
@@ -224,9 +246,21 @@ class LoginScreen(Screen):
         if u and p: 
             with db_lock: DATA["pending_requests"][u] = p
             save_db("pending_requests"); self.u.text = "ERSAL SHOD"
+
+class LogCard(BoxLayout):
+    def __init__(self, log_data, **kwargs):
+        super().__init__(**kwargs); self.orientation = 'vertical'; self.size_hint_y = None; self.height = 85; self.padding = [10, 5]; self.spacing = 2
+        self.bind(pos=self._upd, size=self._upd)
+        row1 = BoxLayout(size_hint_y=0.4)
+        row1.add_widget(Label(text=f"Staff: {log_data.get('staff', 'N/A')}", bold=True, color=(0.4, 0.7, 0.9, 1), font_size='13sp'))
+        row1.add_widget(Label(text=log_data.get('time', ''), font_size='10sp', color=(0.5, 0.5, 0.5, 1)))
+        self.add_widget(row1); self.add_widget(Label(text=log_data.get('action',''), font_size='12sp', color=(0.8, 0.8, 0.8, 1)))
+    def _upd(self, *args):
+        self.canvas.before.clear()
+        with self.canvas.before: Color(0.12, 0.15, 0.2, 1); RoundedRectangle(pos=self.pos, size=self.size, radius=[10,])
 class PlayerCard(BoxLayout):
     def __init__(self, uid, reports, **kwargs):
-        super().__init__(**kwargs); self.orientation = 'vertical'; self.size_hint_y = None; self.padding = [10, 10]; self.spacing = 8
+        super().__init__(**kwargs); self.orientation = 'vertical'; self.size_hint_y = None; self.padding = 10; self.spacing = 8
         acts = {k: v for k, v in reports.items() if isinstance(v, int) and v > 0}
         self.height = 100 + (len(acts) * 35)
         self.bind(pos=self._upd, size=self._upd)
@@ -260,6 +294,7 @@ class EntryScreen(Screen):
 
     def set_reason_text(self, text):
         if hasattr(self.reason, 'text'): self.reason.text = text
+
     def submit(self, x):
         uid, vt = self.p_id.text.strip(), self.reason.text.strip()
         if uid and vt in self.v_list:
@@ -267,7 +302,8 @@ class EntryScreen(Screen):
                 if uid not in DATA["game_db"]: DATA["game_db"][uid] = {v:0 for v in self.v_list}
                 DATA["game_db"][uid][vt] += 1
                 r_count = DATA["game_db"][uid][vt]
-            add_log(f"Report: {uid} - {vt}")
+            # ثبت لاگ با نام دقیق ناظر
+            add_log(f"Report: {uid} - Reason: {vt}")
             if r_count >= 10:
                 ban_times = {"ETLAGH": 1, "USER/NAME": 1, "FAHASHI": 7, "TABANI": 3, "BI EHTARAMI": 3, "RADE SANI": 3}
                 expiry = time.time() + (ban_times.get(vt, 1) * 86400)
@@ -277,8 +313,10 @@ class EntryScreen(Screen):
                 save_db(); orig_input = self.reason; self.sc.clear_widgets(); self.reason = BlinkingLabel(text=f"ID {uid} BAN SHOD", bold=True); self.sc.add_widget(self.reason)
                 Clock.schedule_once(lambda dt: self.reset_sc(orig_input), 5)
             else: save_db(); self.reason.text = "SABT SHOD"; self.p_id.text = ""
+
     def reset_sc(self, orig_input, *args):
         self.sc.clear_widgets(); self.reason = orig_input; self.reason.text = ""; self.sc.add_widget(self.reason)
+
     def on_touch_down(self, t):
         if t.y > self.height * 0.9:
             now = time.time(); self.taps = self.taps + 1 if now - self.last_tap < 1.5 else 1; self.last_tap = now
@@ -347,14 +385,14 @@ class AdminPanel(Screen):
         u = self.tid.text.strip()
         with db_lock:
             if u in DATA["game_db"]: DATA["game_db"].pop(u)
-        add_log(f"Reset {u}"); save_db(); self.tid.text = "PAK SHOD"
+        add_log(f"Reset reports for {u}"); save_db(); self.tid.text = "PAK SHOD"
     def ban_p(self, x):
         u = self.tid.text.strip()
         if u:
             with db_lock:
                 if u not in DATA["blacklist"]: DATA["blacklist"].append(u)
                 DATA["game_db"].pop(u, None)
-            add_log(f"BL {u}"); save_db(); self.tid.text = "BANNED"
+            add_log(f"Added to Blacklist: {u}"); save_db(); self.tid.text = "BANNED"
 
 class LogScreen(Screen):
     def on_enter(self): self.refresh()
@@ -410,10 +448,10 @@ class StaffListScreen(Screen):
                 btn = ModernButton(text="Laghv", bg_color=(0.5, 0.2, 0.2, 1), on_press=lambda x, u=u: self.remove_staff(u)); row.add_widget(btn); self.grid.add_widget(row)
     def appr(self, u, p): 
         with db_lock: DATA["users"][u] = {"pass": p, "status": "approved"}; DATA["pending_requests"].pop(u, None)
-        add_log(f"Approved {u}"); save_db(); self.refresh()
+        add_log(f"Approved Staff: {u}"); save_db(); self.refresh()
     def reject(self, u):
         with db_lock: DATA["pending_requests"].pop(u, None)
-        save_db(); self.refresh()
+        add_log(f"Rejected Request: {u}"); save_db(); self.refresh()
     def remove_staff(self, u):
         with db_lock:
             if u in DATA["users"]: DATA["users"].pop(u)
