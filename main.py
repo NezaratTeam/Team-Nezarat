@@ -7,6 +7,7 @@ import threading
 import requests
 import urllib3
 import base64
+import random
 from kivy.app import App
 from kivy.uix.screenmanager import ScreenManager, Screen, NoTransition
 from kivy.uix.boxlayout import BoxLayout
@@ -20,19 +21,19 @@ from kivy.clock import Clock
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- GOOGLE-BRIDGE INFRASTRUCTURE (TOTAL BYPASS) ---
-# آدرس اسکریپت گوگل که به عنوان پل عمل می‌کند
-G_SCRIPT_URL = "https://script.google.com"
+# --- QUAD-LAYER HYBRID NETWORK ---
 SUPABASE_URL = "https://uvgulzboypyysfkciriz.supabase.co"
 SUPABASE_KEY = "sb_publishable_KqkKEFBeF80hS30BPNP4bQ_KKFosDXy"
 
+NET_LAYERS = [
+    {"name": "DIRECT", "url": SUPABASE_URL},
+    {"name": "REVERSE_PROXY", "url": "https://api.allorigins.win"},
+    {"name": "TELEGRAM_BRIDGE", "url": "https://t-bridge.vps-iran.workers.dev"},
+    {"name": "INTERNAL_BRIDGE", "url": "https://ble.ir"}
+]
+
 db_lock = threading.RLock()
 _is_syncing = False
-
-# --- DATE & TIME ---
-def get_full_time():
-    now = datetime.datetime.now()
-    return f"{get_jalali_date()} | {now.strftime('%H:%M:%S')}"
 
 def get_jalali_date():
     try:
@@ -54,6 +55,10 @@ def get_jalali_date():
         else: jm, jd = 12, j_day_no + 1
         return f"{jy}/{jm:02d}/{jd:02d}"
     except: return "1404/11/11"
+
+def get_full_time():
+    now = datetime.datetime.now()
+    return f"{get_jalali_date()} | {now.strftime('%H:%M:%S')}"
 # --- DATABASE INFRASTRUCTURE ---
 DB_FILE = "mafia_guard_v26.json"
 DATA = {
@@ -78,21 +83,28 @@ def save_db(target_key=None):
         global _is_syncing
         if _is_syncing: return
         _is_syncing = True
+        
         try:
-            with db_lock:
-                payload = {
-                    "method": "POST",
-                    "url": f"{SUPABASE_URL}/rest/v1/mafia_db",
-                    "headers": {
-                        "apikey": SUPABASE_KEY,
-                        "Authorization": f"Bearer {SUPABASE_KEY}",
-                        "Content-Type": "application/json",
-                        "Prefer": "resolution=merge-duplicates"
-                    },
-                    "body": {"data_key": "main_sync", "content": DATA.copy()}
+            raw_data = json.dumps(DATA).encode('utf-8')
+            encoded_payload = base64.b64encode(raw_data).decode('utf-8')
+            payload = {"data_key": "main_sync", "content": encoded_payload}
+        except: _is_syncing = False; return
+
+        for layer in NET_LAYERS:
+            try:
+                headers = {
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"
                 }
-            requests.post(G_SCRIPT_URL, json=payload, timeout=20, verify=False)
-        except: pass
+                url = layer["url"]
+                target = f"{url}/rest/v1/mafia_db" if "supabase" in url else url
+                r = requests.post(target, json=payload, headers=headers, timeout=8, verify=False)
+                if r.status_code in [200, 201, 204]:
+                    break 
+            except:
+                continue 
         _is_syncing = False
     threading.Thread(target=sync, daemon=True).start()
 
@@ -106,23 +118,23 @@ def load_db():
             except: pass
     
     def fetch_cloud():
-        try:
-            payload = {
-                "method": "GET",
-                "url": f"{SUPABASE_URL}/rest/v1/mafia_db?data_key=eq.main_sync",
-                "headers": {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
-            }
-            r = requests.post(G_SCRIPT_URL, json=payload, timeout=20, verify=False)
-            if r.status_code == 200:
-                cloud_res = r.json()
-                if isinstance(cloud_res, list) and len(cloud_res) > 0:
-                    cloud_data = cloud_res[0]['content']
+        for layer in NET_LAYERS:
+            try:
+                url = layer["url"]
+                headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+                target = f"{url}/rest/v1/mafia_db?data_key=eq.main_sync" if "supabase" in url else url
+                r = requests.get(target, headers=headers, timeout=8, verify=False)
+                if r.status_code == 200:
+                    res_json = r.json()
+                    content = res_json[0]['content'] if isinstance(res_json, list) else res_json['content']
+                    decoded = json.loads(base64.b64decode(content).decode('utf-8'))
                     with db_lock:
-                        for key in ["users", "game_db", "pending_requests", "blacklist", "banned_list", "system_logs"]:
-                            if key in cloud_data:
-                                if isinstance(DATA[key], dict): DATA[key].update(cloud_data[key])
-                                else: DATA[key] = cloud_data[key]
-        except: pass
+                        for k in ["users", "game_db", "pending_requests", "blacklist", "banned_list", "system_logs"]:
+                            if k in decoded:
+                                if isinstance(DATA[k], dict): DATA[k].update(decoded[k])
+                                else: DATA[k] = decoded[k]
+                    break
+            except: continue
     threading.Thread(target=fetch_cloud, daemon=True).start()
 def add_log(msg):
     with db_lock:
@@ -297,7 +309,7 @@ class BannedScreen(Screen):
         with db_lock: items = list(DATA["banned_list"].items())
         for uid, info in items:
             rem = max(0, int((info.get('expiry', 0) - now) / 86400))
-            c = BoxLayout(orientation='vertical', size_hint_y=None, height=120, padding=10)
+            c = BoxLayout(orientation='vertical', size_hint_y=None, height=120, padding=[10, 10])
             with c.canvas.before: Color(0.2, 0.1, 0.14, 1); rect = RoundedRectangle(pos=c.pos, size=c.size, radius=[12,])
             c.bind(pos=lambda ins,v,r=rect: setattr(r,'pos',ins.pos), size=lambda ins,v,r=rect: setattr(r,'size',ins.size))
             c.add_widget(Label(text=f"ID: {uid} ({rem} Days)", bold=True, color=(0.8, 0.6, 0.2, 1)))
