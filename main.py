@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-# بخش ۱ از ۷ - تنظیمات زیرساخت جدید (Smart Delta Sync)
 import json, os, datetime, time, threading, requests, urllib3, socket
 from kivy.app import App
 from kivy.uix.screenmanager import ScreenManager, Screen, NoTransition
@@ -56,23 +55,18 @@ DATA = {
     "saved_creds": {"u": "", "p": "", "auto_login": False}
 }
 # -*- coding: utf-8 -*-
-# بخش ۲ از ۷ - موتور همگام‌سازی تفاضلی و مدیریت زمان ایران
-
 def sync_time_offset():
     """هماهنگی دقیق با ساعت رسمی ایران از طریق سرور"""
     global TIME_OFFSET, _NET_STATUS, _PING_VALUE
     try:
         st = time.time()
-        # درخواست برای دریافت زمان دقیق از هدر سرور ایران
         r = requests.get(IRAN_BRIDGE_URL, headers=HEADERS, timeout=10, verify=False)
         _PING_VALUE = str(int((time.time() - st) * 1000))
         if r.status_code == 200:
             _NET_STATUS = True
             server_date = r.headers.get('Date')
             if server_date:
-                # تبدیل زمان GMT سرور به زمان محلی سیستم با احتساب اختلاف ساعت ایران
                 sd = datetime.datetime.strptime(server_date, '%a, %d %b %Y %H:%M:%S GMT')
-                # زمان ایران معمولاً GMT+3.5 است، اما با استفاده از Timestamp هماهنگ می‌شود
                 TIME_OFFSET = sd.timestamp() - time.time()
         else:
             _NET_STATUS = False
@@ -86,7 +80,6 @@ def get_accurate_now():
 
 def get_full_time_ir():
     """نمایش تاریخ و ساعت کامل شمسی/میلادی به وقت ایران"""
-    # اضافه کردن ۳.۵ ساعت (۱۲۶۰۰ ثانیه) برای تنظیم دقیق روی لوکیشن ایران
     now = datetime.datetime.fromtimestamp(get_accurate_now() + 12600)
     return now.strftime('%Y-%m-%d %H:%M:%S')
 
@@ -94,9 +87,7 @@ def save_db(change_data=None):
     """ذخیره محلی و ارسال هوشمند 'فقط تغییرات' به هاست"""
     global DATA, SYNC_QUEUE
     with db_lock:
-        # اگر تغییر جدیدی (مثل گزارش) ثبت شده، به صف ارسال اضافه کن
         if change_data:
-            # اضافه کردن فیلدها برای هماهنگی با ستون‌های SQL
             change_data["staff_name"] = getattr(App.get_running_app(), 'session_user', 'System')
             change_data["report_time"] = get_full_time_ir()
             SYNC_QUEUE.append(change_data)
@@ -106,28 +97,24 @@ def save_db(change_data=None):
                 json.dump(DATA, f, indent=4, ensure_ascii=False)
         except: pass
     
-    # اجرای موتور ارسال هوشمند در پس‌زمینه بدون قفل کردن اپلیکیشن
     if not _is_syncing:
         threading.Thread(target=smart_sync_engine, daemon=True).start()
 
 def smart_sync_engine():
-    """ارسال تفاضلی: فقط دیتای تغییر یافته را می‌فرستد (بسیار کم حجم و سریع)"""
+    """ارسال تفاضلی: فقط دیتای تغییر یافته را می‌فرستد"""
     global _is_syncing, _NET_STATUS, SYNC_QUEUE
     if not SYNC_QUEUE: return
     _is_syncing = True
     
     try:
         with db_lock:
-            # بسته‌بندی هوشمند: کل دیتا + لیست تغییرات اخیر
             payload = {
                 "full_data": DATA,
                 "changes": SYNC_QUEUE,
                 "timestamp": get_accurate_now()
             }
-            # کپی از تغییراتی که قرار است ارسال شوند
             current_batch = list(SYNC_QUEUE)
 
-        # ارسال با Timeout بالا (۳۰ ثانیه) برای پایداری در پینگ‌های ضعیف اندروید
         r = requests.post(
             IRAN_BRIDGE_URL, 
             json=payload, 
@@ -139,7 +126,6 @@ def smart_sync_engine():
         if r.status_code == 200 and "OK_SUCCESS" in r.text:
             _NET_STATUS = True
             with db_lock:
-                # پس از تایید هاست، موارد ارسال شده را از صف حذف کن
                 for item in current_batch:
                     if item in SYNC_QUEUE: SYNC_QUEUE.remove(item)
         else:
@@ -149,15 +135,11 @@ def smart_sync_engine():
     finally:
         _is_syncing = False
 # -*- coding: utf-8 -*-
-# بخش ۳ از ۷ - همگام‌سازی ابری و کلاس‌های گرافیکی پایه
-
 def check_auto_unban():
     now = get_accurate_now()
     changed = False
     with db_lock:
-        # اصلاح برای اطمینان از سلامت دیتاتایپ برای جلوگیری از خطا در هاست
-        if isinstance(DATA.get("banned_list"), list): DATA["banned_list"] = {}
-        
+        if not isinstance(DATA.get("banned_list"), dict): DATA["banned_list"] = {}
         for uid in list(DATA["banned_list"].keys()):
             if now >= DATA["banned_list"][uid].get("expiry", 0):
                 DATA["banned_list"].pop(uid)
@@ -169,44 +151,39 @@ def load_db():
     if os.path.exists(DB_FILE):
         try:
             with open(DB_FILE, "r", encoding='utf-8') as f:
-                with db_lock: DATA.update(json.load(f))
+                with db_lock: 
+                    loaded_data = json.load(f)
+                    if isinstance(loaded_data, dict):
+                        DATA.update(loaded_data)
         except: pass
     
-    # اطمینان از صحت ساختار دیکشنری پس از لود
     if not isinstance(DATA.get("banned_list"), dict): DATA["banned_list"] = {}
     if not isinstance(DATA.get("game_db"), dict): DATA["game_db"] = {}
+    if not isinstance(DATA.get("pending_requests"), dict): DATA["pending_requests"] = {}
     
     check_auto_unban()
-    # فراخوانی موتور دریافت اطلاعات از هاست در بدو اجرا
     threading.Thread(target=fetch_cloud_engine, daemon=True).start()
 
 def fetch_cloud_engine(on_complete=None):
     global _NET_STATUS, DATA
     try:
-        # درخواست GET به هاست برای دریافت آخرین وضعیت دیتابیس
         r = requests.get(IRAN_BRIDGE_URL, headers=HEADERS, timeout=15, verify=False)
         if r.status_code == 200:
             _NET_STATUS = True
-            # دریافت دیتای کامل از فایل JSON روی هاست
             cloud = r.json()
-            
             if cloud and isinstance(cloud, dict) and "users" in cloud:
                 with db_lock:
-                    # همگام‌سازی بخش‌های مختلف دیتابیس با رعایت منطق ادمین
                     for key in cloud:
                         if key == "users":
                             DATA["users"].update(cloud["users"])
                         elif key == "staff_activity":
-                            # فقط ادمین کل فعالیت‌ها را جایگزین می‌کند
                             if getattr(App.get_running_app(), 'session_user', '') == 'admin':
                                 DATA[key] = cloud[key]
                         else:
-                            # جلوگیری از تبدیل دیکشنری به لیست در هنگام دریافت دیتای خالی از هاست
-                            if key in ["banned_list", "game_db"] and isinstance(cloud[key], list):
+                            if key in ["banned_list", "game_db", "pending_requests"] and (isinstance(cloud[key], list) or cloud[key] is None):
                                 DATA[key] = {}
                             else:
                                 DATA[key] = cloud[key]
-                
                 check_auto_unban()
                 if on_complete: on_complete(True)
         else:
@@ -228,7 +205,6 @@ class ConnectionLight(BoxLayout):
         self.ping_lbl.text = f"{_PING_VALUE}ms"
         self.led.canvas.before.clear()
         with self.led.canvas.before:
-            # سبز برای اتصال برقرار، قرمز برای قطع اتصال
             Color(0.2, 0.8, 0.2, 1) if _NET_STATUS else Color(0.8, 0.2, 0.2, 1)
             RoundedRectangle(pos=self.led.pos, size=self.led.size, radius=[6,])
 
@@ -240,8 +216,6 @@ class ModernButton(Button):
         self.canvas.before.clear()
         with self.canvas.before: Color(*self.bg_color); RoundedRectangle(pos=self.pos, size=self.size, radius=self.radius)
 # -*- coding: utf-8 -*-
-# بخش ۴ از ۷ - ورودی‌های مدرن و صفحه ورود هوشمند
-
 class DynamicBlinkingInput(TextInput):
     def __init__(self, **kwargs):
         super().__init__(**kwargs); self.readonly = True; self.halign = 'center'
@@ -270,18 +244,15 @@ class ModernInput(TextInput):
         self.foreground_color = (0.9, 0.9, 0.9, 1); self.padding = [10, 10, 10, 10]; self.multiline = False
 
 def add_staff_log(target_id, action):
-    """ثبت سوابق فعالیت ناظر با تاریخ و ساعت دقیق از سرور"""
     staff = getattr(App.get_running_app(), 'session_user', 'System')
     entry = {"staff": staff, "target": target_id, "action": action, "time": get_full_time_ir()}
     with db_lock:
         if "staff_activity" not in DATA: DATA["staff_activity"] = []
         DATA["staff_activity"].insert(0, entry)
-    # افزودن لاگ به صف ارسال تفاضلی
     save_db({"action": "log", "entry": entry})
 
 class LoginScreen(Screen):
     def on_enter(self): 
-        # هماهنگ‌سازی ساعت با سرور جدید در بدو ورود
         threading.Thread(target=sync_time_offset, daemon=True).start()
         with db_lock:
             creds = DATA.get("saved_creds", {})
@@ -302,7 +273,6 @@ class LoginScreen(Screen):
 
     def login(self, x=None):
         self.u.hint_text = "VASYB BE TUNEL..."
-        # استعلام لحظه‌ای از دیتابیس هاست جدید قبل از ورود
         threading.Thread(target=fetch_cloud_engine, args=(self.execute_login,), daemon=True).start()
 
     def execute_login(self, success):
@@ -310,11 +280,9 @@ class LoginScreen(Screen):
 
     def _final_login_check(self):
         u, p = self.u.text.strip(), self.p.text.strip()
-        # شناسایی دیوایس برای قفل سخت‌افزاری
         dev_id = socket.gethostname() if platform != 'android' else "ANDROID-NODE" 
         
         with db_lock:
-            # بررسی دسترسی ادمین با پسورد هاردکد شده
             if u == "admin" and p == "MAHDI@#25#":
                 App.get_running_app().session_user = u
                 DATA["saved_creds"] = {"u": u, "p": p, "auto_login": True}
@@ -322,7 +290,6 @@ class LoginScreen(Screen):
                 self.manager.current = 'entry'
                 return
 
-            # بررسی یوزرهای معمولی در دیتابیس سینک شده از هاست
             if u in DATA["users"] and DATA["users"][u]["pass"] == p:
                 user_info = DATA["users"][u]
                 if user_info.get("status") == "approved":
@@ -347,12 +314,13 @@ class LoginScreen(Screen):
     def req(self, x):
         u, p = self.u.text.strip(), self.p.text.strip()
         if u and p: 
-            with db_lock: DATA["pending_requests"][u] = p
+            with db_lock:
+                if not isinstance(DATA.get("pending_requests"), dict):
+                    DATA["pending_requests"] = {}
+                DATA["pending_requests"][u] = p
             save_db({"action": "request_join", "u": u, "p": p})
             self.u.text = "DAR KHAST ERSAL SHOD"
 # -*- coding: utf-8 -*-
-# بخش ۵ از ۷ - پنل اصلی گزارش‌دهی و مانیتورینگ آنی
-
 BAN_DAYS_MAP = {"ETLAGH": 1, "USER/NAME": 2, "FAHASHI": 3, "TABANI": 5, "BI EHTARAMI": 4, "RADE SANI": 7}
 
 class EntryScreen(Screen):
@@ -450,8 +418,6 @@ class EntryScreen(Screen):
                 return True
         return super().on_touch_down(t)
 # -*- coding: utf-8 -*-
-# بخش ۶ از ۷ - سیستم نمایش دیتای ابری و مدیریت جریمه‌ها
-
 class StatusScreen(Screen):
     def on_enter(self): self.refresh()
     def __init__(self, **kw):
@@ -494,7 +460,7 @@ class StatusScreen(Screen):
 
     def quick_unb(self, uid):
         u = getattr(App.get_running_app(), 'session_user', '')
-        is_permitted = u == "admin" or u in DATA.get("permissions", [])
+        is_permitted = (u == "admin" or u in DATA.get("permissions", []))
         if is_permitted or self.adm_key.text == "MAHDI@#25#":
             with db_lock:
                 if isinstance(DATA.get("game_db"), dict): DATA["game_db"].pop(uid, None)
@@ -529,17 +495,15 @@ class BlacklistScreen(Screen):
 
     def un_blacklist(self, uid):
         u = getattr(App.get_running_app(), 'session_user', '')
-        is_permitted = u == "admin" or u in DATA.get("permissions", [])
+        is_permitted = (u == "admin" or u in DATA.get("permissions", []))
         if is_permitted or self.key.text == "MAHDI@#25#":
-            with db_lock: 
+            with db_lock:
                 if isinstance(DATA.get("blacklist"), list) and uid in DATA["blacklist"]: 
                     DATA["blacklist"].remove(uid)
             save_db({"action": "remove_blacklist", "uid": uid})
             self.key.text = ""; self.refresh()
         else: self.key.text = "NO PERMISSION"
 # -*- coding: utf-8 -*-
-# بخش ۷ از ۷ - مدیریت کلان (Owner Dashboard) و اجرای نهایی اپلیکیشن
-
 class BannedScreen(Screen):
     def on_enter(self): 
         check_auto_unban(); self.refresh()
@@ -569,7 +533,7 @@ class BannedScreen(Screen):
 
     def secure_unb(self, uid):
         u = getattr(App.get_running_app(), 'session_user', '')
-        is_permitted = u == "admin" or u in DATA.get("permissions", [])
+        is_permitted = (u == "admin" or u in DATA.get("permissions", []))
         if is_permitted or self.key.text == "MAHDI@#25#":
             with db_lock: 
                 if isinstance(DATA.get("banned_list"), dict) and uid in DATA["banned_list"]: DATA["banned_list"].pop(uid)
@@ -609,6 +573,7 @@ class AdminPanel(Screen):
 
     def toggle_perm(self, u):
         with db_lock:
+            if "permissions" not in DATA: DATA["permissions"] = []
             if u in DATA["permissions"]: DATA["permissions"].remove(u)
             else: DATA["permissions"].append(u)
         save_db({"action": "toggle_permission", "u": u})
@@ -618,6 +583,7 @@ class AdminPanel(Screen):
         scroll = ScrollView(); grid = GridLayout(cols=1, spacing=10, size_hint_y=None)
         grid.bind(minimum_height=grid.setter('height')); scroll.add_widget(grid)
         with db_lock:
+            if not isinstance(DATA.get("pending_requests"), dict): DATA["pending_requests"] = {}
             for u, p in list(DATA.get("pending_requests", {}).items()):
                 row = BoxLayout(size_hint_y=None, height=50, spacing=5)
                 row.add_widget(Label(text=f"User: {u}", font_size='13sp'))
@@ -628,8 +594,9 @@ class AdminPanel(Screen):
     def approve(self, u, p):
         with db_lock:
             if u in DATA.get("ejected_users", []): DATA["ejected_users"].remove(u)
+            if "users" not in DATA: DATA["users"] = {}
             DATA["users"][u] = {"pass": p, "status": "approved", "device": ""}
-            if u in DATA["pending_requests"]: DATA["pending_requests"].pop(u)
+            if isinstance(DATA.get("pending_requests"), dict): DATA["pending_requests"].pop(u, None)
             add_staff_log(u, "TAYID MAJJAD")
         save_db({"action": "approve_user", "u": u, "p": p})
 
@@ -649,8 +616,9 @@ class AdminPanel(Screen):
     def eject(self, u):
         with db_lock:
             if u in DATA.get("permissions", []): DATA["permissions"].remove(u)
+            if "ejected_users" not in DATA: DATA["ejected_users"] = []
             if u not in DATA["ejected_users"]: DATA["ejected_users"].append(u)
-            if u in DATA["users"]: DATA["users"][u]["status"] = "ejected"
+            if u in DATA.get("users", {}): DATA["users"][u]["status"] = "ejected"
             add_staff_log(u, "EKRAJ SHOD")
         save_db({"action": "eject_user", "u": u})
 
@@ -675,6 +643,7 @@ class AdminPanel(Screen):
         def save_tools(instance):
             with db_lock:
                 DATA["global_notice"] = not_inp.text
+                if not isinstance(DATA.get("blacklist"), list): DATA["blacklist"] = []
                 if bl_inp.text and bl_inp.text not in DATA["blacklist"]: DATA["blacklist"].append(bl_inp.text)
             save_db({"action": "update_tools", "notice": not_inp.text, "bl": bl_inp.text})
             pop.dismiss()
