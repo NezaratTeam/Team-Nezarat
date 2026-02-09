@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# بخش ۱ از ۷ - تنظیمات زیرساخت جدید (Smart Delta Sync)
 import json, os, datetime, time, threading, requests, urllib3, socket
 from kivy.app import App
 from kivy.uix.screenmanager import ScreenManager, Screen, NoTransition
@@ -15,45 +16,35 @@ from kivy.uix.popup import Popup
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- CONFIG (بهینه‌شده برای نت ملی و ساعت رسمی ایران) ---
-CURRENT_VERSION = "1.1" 
-# آدرس تونل اختصاصی شما در ایران (بدون نیاز به دامنه)
-IRAN_BRIDGE_URL = "http://185.164.72.71"
+# --- CONFIG (اتصال هوشمند به هاست پارس‌پک) ---
+CURRENT_VERSION = "1.2" 
+
+# آدرس روت هاست (متصل به index.php)
+IRAN_BRIDGE_URL = "https://devconnect-123.ir"
+
+# کلید امنیتی دقیق برای عبور از سد امنیتی هاست
+API_SECRET_KEY = "MAHDI_SECURE_TOKEN_2024"
+
+# هدرهای بهینه شده برای پایداری در پینگ ۳۰۰ms و اندروید
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Linux; Android 10; Mobile)',
+    'Content-Type': 'application/json',
+    'X-API-KEY': API_SECRET_KEY,
+    'Connection': 'keep-alive'
+}
 
 db_lock = threading.RLock()
 _is_syncing = False
-TIME_OFFSET = 0 
 _NET_STATUS = False 
 _PING_VALUE = "0"
+TIME_OFFSET = 0 
 
-def sync_time_offset():
-    """هماهنگ‌سازی ساعت با سرورهای ایران جهت ثبت دقیق گزارش‌ها"""
-    global TIME_OFFSET, _NET_STATUS, _PING_VALUE
-    try:
-        st = time.time()
-        # استعلام زمان از API رسمی منطبق بر آسیا/تهران
-        r = requests.get("http://worldtimeapi.org", timeout=5)
-        _PING_VALUE = str(int((time.time() - st) * 1000))
-        if r.status_code == 200:
-            TIME_OFFSET = r.json()['unixtime'] - time.time()
-            _NET_STATUS = True
-        else:
-            _NET_STATUS = False
-    except: 
-        _NET_STATUS = False
-        _PING_VALUE = "999"
+# صف هوشمند برای ارسال فقط "تغییرات جدید" (تفاضلی)
+SYNC_QUEUE = [] 
 
-def get_accurate_now():
-    """خروجی ثانیه‌شمار دقیق بر اساس وقت ایران"""
-    return time.time() + TIME_OFFSET
-
-def get_full_time_ir():
-    """فرمت‌دهی تاریخ و ساعت رسمی ایران برای ثبت در سوابق"""
-    now = datetime.datetime.fromtimestamp(get_accurate_now())
-    return now.strftime('%Y/%m/%d - %H:%M:%S')
-
-BAN_DAYS_MAP = {"ETLAGH": 1, "USER/NAME": 1, "FAHASHI": 7, "TABANI": 3, "BI EHTARAMI": 3, "RADE SANI": 1}
 DB_FILE = "mafia_guard_v32.json"
+
+# ساختار دیتای اولیه
 DATA = {
     "version": CURRENT_VERSION,
     "last_sync_etag": 0,
@@ -64,105 +55,165 @@ DATA = {
     "global_notice": "نظارت آنلاین خوش آمدید", "staff_activity": [], "ejected_users": [], 
     "saved_creds": {"u": "", "p": "", "auto_login": False}
 }
-def save_db():
-    """ذخیره‌سازی ایمن با مدیریت تداخل ۴۰ ناظر همزمان و پاکسازی ۶۰ روزه سوابق"""
-    global DATA
-    with db_lock:
-        try:
-            now = get_accurate_now()
-            # بازه ۶۰ روزه برای پاکسازی سوابق (۵۱۸۴۰۰۰ ثانیه)
-            # اطلاعات ناظرین (users) هرگز تحت هیچ شرایطی پاک نمی‌شود
-            if now - DATA.get("last_cleanup_time", 0) > 5184000:
-                if len(DATA["staff_activity"]) > 2000:
-                    DATA["staff_activity"] = DATA["staff_activity"][:2000]
-                
-                game_items = list(DATA["game_db"].items())
-                if len(game_items) > 2000:
-                    DATA["game_db"] = dict(game_items[-2000:])
-                
-                DATA["last_cleanup_time"] = now
+# -*- coding: utf-8 -*-
+# بخش ۲ از ۷ - موتور همگام‌سازی تفاضلی و مدیریت زمان ایران
 
+def sync_time_offset():
+    """هماهنگی دقیق با ساعت رسمی ایران از طریق سرور"""
+    global TIME_OFFSET, _NET_STATUS, _PING_VALUE
+    try:
+        st = time.time()
+        # درخواست برای دریافت زمان دقیق از هدر سرور ایران
+        r = requests.get(IRAN_BRIDGE_URL, headers=HEADERS, timeout=10, verify=False)
+        _PING_VALUE = str(int((time.time() - st) * 1000))
+        if r.status_code == 200:
+            _NET_STATUS = True
+            server_date = r.headers.get('Date')
+            if server_date:
+                # تبدیل زمان GMT سرور به زمان محلی سیستم با احتساب اختلاف ساعت ایران
+                sd = datetime.datetime.strptime(server_date, '%a, %d %b %Y %H:%M:%S GMT')
+                # زمان ایران معمولاً GMT+3.5 است، اما با استفاده از Timestamp هماهنگ می‌شود
+                TIME_OFFSET = sd.timestamp() - time.time()
+        else:
+            _NET_STATUS = False
+    except: 
+        _NET_STATUS = False
+        _PING_VALUE = "999"
+
+def get_accurate_now():
+    """دریافت تایم استمپ دقیق ثانیه‌ای بر اساس ساعت ایران"""
+    return time.time() + TIME_OFFSET
+
+def get_full_time_ir():
+    """نمایش تاریخ و ساعت کامل شمسی/میلادی به وقت ایران"""
+    # اضافه کردن ۳.۵ ساعت (۱۲۶۰۰ ثانیه) برای تنظیم دقیق روی لوکیشن ایران
+    now = datetime.datetime.fromtimestamp(get_accurate_now() + 12600)
+    return now.strftime('%Y-%m-%d %H:%M:%S')
+
+def save_db(change_data=None):
+    """ذخیره محلی و ارسال هوشمند 'فقط تغییرات' به هاست"""
+    global DATA, SYNC_QUEUE
+    with db_lock:
+        # اگر تغییر جدیدی (مثل گزارش) ثبت شده، به صف ارسال اضافه کن
+        if change_data:
+            # اضافه کردن فیلدها برای هماهنگی با ستون‌های SQL
+            change_data["staff_name"] = getattr(App.get_running_app(), 'session_user', 'System')
+            change_data["report_time"] = get_full_time_ir()
+            SYNC_QUEUE.append(change_data)
+        
+        try:
             with open(DB_FILE, "w", encoding='utf-8') as f:
                 json.dump(DATA, f, indent=4, ensure_ascii=False)
         except: pass
     
-    # ارسال به هاست ایران (IRAN BRIDGE) جهت عبور از سد نت ملی
-    threading.Thread(target=sync_plain_engine, daemon=True).start()
+    # اجرای موتور ارسال هوشمند در پس‌زمینه بدون قفل کردن اپلیکیشن
+    if not _is_syncing:
+        threading.Thread(target=smart_sync_engine, daemon=True).start()
 
-def sync_plain_engine():
-    """ارسال دیتا به هاست ایران با متد POST جهت ثبت در سایت سوپابیس"""
-    global _is_syncing, _NET_STATUS
-    if _is_syncing: return
+def smart_sync_engine():
+    """ارسال تفاضلی: فقط دیتای تغییر یافته را می‌فرستد (بسیار کم حجم و سریع)"""
+    global _is_syncing, _NET_STATUS, SYNC_QUEUE
+    if not SYNC_QUEUE: return
     _is_syncing = True
+    
     try:
         with db_lock:
-            # ثبت زمان دقیق آخرین همگام‌سازی به وقت ایران
-            DATA["last_sync_etag"] = get_accurate_now()
-            plain_json_str = json.dumps(DATA, indent=4, ensure_ascii=False)
+            # بسته‌بندی هوشمند: کل دیتا + لیست تغییرات اخیر
+            payload = {
+                "full_data": DATA,
+                "changes": SYNC_QUEUE,
+                "timestamp": get_accurate_now()
+            }
+            # کپی از تغییراتی که قرار است ارسال شوند
+            current_batch = list(SYNC_QUEUE)
+
+        # ارسال با Timeout بالا (۳۰ ثانیه) برای پایداری در پینگ‌های ضعیف اندروید
+        r = requests.post(
+            IRAN_BRIDGE_URL, 
+            json=payload, 
+            headers=HEADERS, 
+            timeout=30,
+            verify=False 
+        )
         
-        # ارسال مستقیم به آی‌پی ایران شما (پایداری ۱۰۰٪ در نت ملی)
-        r = requests.post(IRAN_BRIDGE_URL, data=plain_json_str.encode('utf-8'), timeout=15)
-        
-        # کد ۲۰۰ نشانه دریافت موفق توسط هاست ایران و انتقال به سوپابیس است
-        _NET_STATUS = True if r.status_code == 200 else False
-    except: 
+        if r.status_code == 200 and "OK_SUCCESS" in r.text:
+            _NET_STATUS = True
+            with db_lock:
+                # پس از تایید هاست، موارد ارسال شده را از صف حذف کن
+                for item in current_batch:
+                    if item in SYNC_QUEUE: SYNC_QUEUE.remove(item)
+        else:
+            _NET_STATUS = False
+    except:
         _NET_STATUS = False
     finally:
         _is_syncing = False
+# -*- coding: utf-8 -*-
+# بخش ۳ از ۷ - همگام‌سازی ابری و کلاس‌های گرافیکی پایه
 
 def check_auto_unban():
-    """آزادسازی خودکار بن‌های منقضی شده بر اساس ساعت دقیق ایران"""
     now = get_accurate_now()
     changed = False
     with db_lock:
+        # اصلاح برای اطمینان از سلامت دیتاتایپ برای جلوگیری از خطا در هاست
+        if isinstance(DATA.get("banned_list"), list): DATA["banned_list"] = {}
+        
         for uid in list(DATA["banned_list"].keys()):
             if now >= DATA["banned_list"][uid].get("expiry", 0):
                 DATA["banned_list"].pop(uid)
                 changed = True
-    if changed: save_db()
+    if changed: save_db({"action": "auto_unban"})
 
 def load_db():
-    """بارگذاری اولیه و استعلام فوری از تونل ایران برای چک کردن وضعیت ناظرین"""
     global DATA
     if os.path.exists(DB_FILE):
         try:
             with open(DB_FILE, "r", encoding='utf-8') as f:
                 with db_lock: DATA.update(json.load(f))
         except: pass
+    
+    # اطمینان از صحت ساختار دیکشنری پس از لود
+    if not isinstance(DATA.get("banned_list"), dict): DATA["banned_list"] = {}
+    if not isinstance(DATA.get("game_db"), dict): DATA["game_db"] = {}
+    
     check_auto_unban()
-    # دریافت آنی آخرین تغییرات لیست ناظرین از طریق هاست ایران
+    # فراخوانی موتور دریافت اطلاعات از هاست در بدو اجرا
     threading.Thread(target=fetch_cloud_engine, daemon=True).start()
 
 def fetch_cloud_engine(on_complete=None):
-    """دریافت دیتا از طریق تونل اختصاصی ایران (Bypass Net Meli)"""
     global _NET_STATUS, DATA
     try:
-        # برای دریافت دیتا، از پارامتر خاص در تونل استفاده می‌کنیم
-        r = requests.get(IRAN_BRIDGE_URL, timeout=10)
+        # درخواست GET به هاست برای دریافت آخرین وضعیت دیتابیس
+        r = requests.get(IRAN_BRIDGE_URL, headers=HEADERS, timeout=15, verify=False)
         if r.status_code == 200:
             _NET_STATUS = True
-            res = r.json()
-            item = res if isinstance(res, list) and len(res)>0 else (res if res else {})
-            raw_data = item.get('content', "{}")
-            cloud = json.loads(raw_data) if isinstance(raw_data, str) else raw_data
+            # دریافت دیتای کامل از فایل JSON روی هاست
+            cloud = r.json()
             
             if cloud and isinstance(cloud, dict) and "users" in cloud:
                 with db_lock:
-                    # ادغام هوشمند جهت جلوگیری از تداخل گزارش‌های ۴۰ ناظر همزمان
+                    # همگام‌سازی بخش‌های مختلف دیتابیس با رعایت منطق ادمین
                     for key in cloud:
                         if key == "users":
                             DATA["users"].update(cloud["users"])
                         elif key == "staff_activity":
+                            # فقط ادمین کل فعالیت‌ها را جایگزین می‌کند
                             if getattr(App.get_running_app(), 'session_user', '') == 'admin':
                                 DATA[key] = cloud[key]
                         else:
-                            DATA[key] = cloud[key]
+                            # جلوگیری از تبدیل دیکشنری به لیست در هنگام دریافت دیتای خالی از هاست
+                            if key in ["banned_list", "game_db"] and isinstance(cloud[key], list):
+                                DATA[key] = {}
+                            else:
+                                DATA[key] = cloud[key]
+                
                 check_auto_unban()
                 if on_complete: on_complete(True)
         else:
             if on_complete: on_complete(False)
     except:
         if on_complete: on_complete(False)
+
 class ConnectionLight(BoxLayout):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -173,11 +224,11 @@ class ConnectionLight(BoxLayout):
         Clock.schedule_interval(self.update_status, 5)
     
     def update_status(self, dt):
-        # بررسی وضعیت اتصال از طریق هاست ایران
         threading.Thread(target=sync_time_offset, daemon=True).start()
         self.ping_lbl.text = f"{_PING_VALUE}ms"
         self.led.canvas.before.clear()
         with self.led.canvas.before:
+            # سبز برای اتصال برقرار، قرمز برای قطع اتصال
             Color(0.2, 0.8, 0.2, 1) if _NET_STATUS else Color(0.8, 0.2, 0.2, 1)
             RoundedRectangle(pos=self.led.pos, size=self.led.size, radius=[6,])
 
@@ -188,6 +239,8 @@ class ModernButton(Button):
     def _upd(self, *args):
         self.canvas.before.clear()
         with self.canvas.before: Color(*self.bg_color); RoundedRectangle(pos=self.pos, size=self.size, radius=self.radius)
+# -*- coding: utf-8 -*-
+# بخش ۴ از ۷ - ورودی‌های مدرن و صفحه ورود هوشمند
 
 class DynamicBlinkingInput(TextInput):
     def __init__(self, **kwargs):
@@ -195,7 +248,7 @@ class DynamicBlinkingInput(TextInput):
         self.background_normal = ""; self.background_color = (0.1, 0.12, 0.16, 1)
         self.foreground_color = (0.9, 0.9, 0.9, 1); self.is_blinking = False
         self._blink_ev = None
-
+    
     def start_ban_blink(self, reason_text):
         if not self.is_blinking:
             self.is_blinking = True
@@ -217,16 +270,18 @@ class ModernInput(TextInput):
         self.foreground_color = (0.9, 0.9, 0.9, 1); self.padding = [10, 10, 10, 10]; self.multiline = False
 
 def add_staff_log(target_id, action):
-    """ثبت سوابق فعالیت ناظر با تاریخ و ساعت دقیق ایران"""
+    """ثبت سوابق فعالیت ناظر با تاریخ و ساعت دقیق از سرور"""
     staff = getattr(App.get_running_app(), 'session_user', 'System')
     entry = {"staff": staff, "target": target_id, "action": action, "time": get_full_time_ir()}
     with db_lock:
         if "staff_activity" not in DATA: DATA["staff_activity"] = []
         DATA["staff_activity"].insert(0, entry)
-    save_db()
+    # افزودن لاگ به صف ارسال تفاضلی
+    save_db({"action": "log", "entry": entry})
+
 class LoginScreen(Screen):
     def on_enter(self): 
-        # هماهنگ‌سازی ساعت ایران در بدو ورود
+        # هماهنگ‌سازی ساعت با سرور جدید در بدو ورود
         threading.Thread(target=sync_time_offset, daemon=True).start()
         with db_lock:
             creds = DATA.get("saved_creds", {})
@@ -247,7 +302,7 @@ class LoginScreen(Screen):
 
     def login(self, x=None):
         self.u.hint_text = "VASYB BE TUNEL..."
-        # استعلام از هاست ایران برای وضعیت تایید ناظر
+        # استعلام لحظه‌ای از دیتابیس هاست جدید قبل از ورود
         threading.Thread(target=fetch_cloud_engine, args=(self.execute_login,), daemon=True).start()
 
     def execute_login(self, success):
@@ -255,17 +310,19 @@ class LoginScreen(Screen):
 
     def _final_login_check(self):
         u, p = self.u.text.strip(), self.p.text.strip()
+        # شناسایی دیوایس برای قفل سخت‌افزاری
         dev_id = socket.gethostname() if platform != 'android' else "ANDROID-NODE" 
         
         with db_lock:
-            # --- پل اضطراری ادمین: همیشه کار می‌کند ---
+            # بررسی دسترسی ادمین با پسورد هاردکد شده
             if u == "admin" and p == "MAHDI@#25#":
                 App.get_running_app().session_user = u
                 DATA["saved_creds"] = {"u": u, "p": p, "auto_login": True}
-                save_db(); self.manager.current = 'entry'
+                save_db({"action": "admin_login"})
+                self.manager.current = 'entry'
                 return
 
-            # --- بررسی ناظرین تایید شده ---
+            # بررسی یوزرهای معمولی در دیتابیس سینک شده از هاست
             if u in DATA["users"] and DATA["users"][u]["pass"] == p:
                 user_info = DATA["users"][u]
                 if user_info.get("status") == "approved":
@@ -273,12 +330,13 @@ class LoginScreen(Screen):
                     
                     if not user_info.get("device"): 
                         user_info["device"] = dev_id
-                        save_db()
+                        save_db({"action": "device_lock", "u": u, "dev": dev_id})
                     
                     if user_info["device"] == dev_id:
                         App.get_running_app().session_user = u
                         DATA["saved_creds"] = {"u": u, "p": p, "auto_login": True}
-                        save_db(); self.manager.current = 'entry'
+                        save_db({"action": "user_login", "u": u})
+                        self.manager.current = 'entry'
                     else:
                         self.u.text = "GOSHI MOJAZ NIST!"
                 else:
@@ -290,11 +348,15 @@ class LoginScreen(Screen):
         u, p = self.u.text.strip(), self.p.text.strip()
         if u and p: 
             with db_lock: DATA["pending_requests"][u] = p
-            save_db(); self.u.text = "DAR KHAST ERSAL SHOD"
+            save_db({"action": "request_join", "u": u, "p": p})
+            self.u.text = "DAR KHAST ERSAL SHOD"
+# -*- coding: utf-8 -*-
+# بخش ۵ از ۷ - پنل اصلی گزارش‌دهی و مانیتورینگ آنی
+
+BAN_DAYS_MAP = {"ETLAGH": 1, "USER/NAME": 2, "FAHASHI": 3, "TABANI": 5, "BI EHTARAMI": 4, "RADE SANI": 7}
 
 class EntryScreen(Screen):
     def on_enter(self):
-        # مانیتورینگ وضعیت اخراج به وقت ایران
         self.monitor_ev = Clock.schedule_interval(self.check_ejection, 10)
         self.update_notice_display()
 
@@ -307,18 +369,19 @@ class EntryScreen(Screen):
             Clock.unschedule(self.monitor_ev)
             self.manager.current = 'login'
             App.get_running_app().root.get_screen('login').u.text = "EKRAJ SHODID!"
+
     def __init__(self, **kw):
         super().__init__(**kw); self.taps = 0; self.last_tap = 0
         l = BoxLayout(orientation='vertical', padding=20, spacing=12)
         h = BoxLayout(size_hint_y=0.05); h.add_widget(ConnectionLight()); h.add_widget(Label()); l.add_widget(h)
         
-        # نمایش اطلاعیه سراسری ادمین
         self.notice_lbl = Label(text="", size_hint_y=0.05, color=(1, 0.8, 0.2, 1), bold=True)
         l.add_widget(self.notice_lbl)
 
         l.add_widget(Label(text="PANELE NEZARAT", bold=True, size_hint_y=0.08, font_size='20sp', color=(0.5, 0.6, 0.8, 1)))
         self.p_id = ModernInput(hint_text="ID Karbar", size_hint_y=0.1)
         l.add_widget(self.p_id)
+        
         self.reason_box = DynamicBlinkingInput(hint_text="ENTEKHABE KHALAF", size_hint_y=0.08)
         l.add_widget(self.reason_box)
         
@@ -342,36 +405,38 @@ class EntryScreen(Screen):
     def select_khalaf(self, name):
         self.reason_box.stop_blink(name)
         uid = self.p_id.text.strip()
-        if uid and uid in DATA["game_db"]:
-            if DATA["game_db"][uid].get(name, 0) >= 10:
-                self.reason_box.start_ban_blink(name)
+        with db_lock:
+            if not isinstance(DATA.get("game_db"), dict): DATA["game_db"] = {}
+            if uid and uid in DATA["game_db"]:
+                if DATA["game_db"][uid].get(name, 0) >= 10:
+                    self.reason_box.start_ban_blink(name)
 
     def logout(self, x):
         with db_lock: DATA["saved_creds"]["auto_login"] = False
-        save_db(); self.manager.current = 'login'
+        save_db({"action": "logout"})
+        self.manager.current = 'login'
 
     def submit(self, x):
         uid, vt = self.p_id.text.strip(), self.reason_box.text.strip()
         if not uid or vt not in self.v_list: return
         with db_lock:
+            if not isinstance(DATA.get("game_db"), dict): DATA["game_db"] = {}
             if uid not in DATA["game_db"]: DATA["game_db"][uid] = {v:0 for v in self.v_list}
             DATA["game_db"][uid][vt] += 1
             count = DATA["game_db"][uid][vt]
-            # ثبت فعالیت ناظر با تاریخ و ساعت دقیق ایران
             add_staff_log(uid, f"GozARESH: {vt} (Count: {count})")
             
             if count >= 10:
                 days = BAN_DAYS_MAP.get(vt, 1)
-                # محاسبه زمان انقضا دقیقاً بر اساس ساعت ایران
                 expiry = get_accurate_now() + (days * 86400)
-                DATA["banned_list"][uid] = {
-                    "reason": vt, 
-                    "date": get_full_time_ir(), 
-                    "expiry": expiry
-                }
+                ban_entry = {"reason": vt, "date": get_full_time_ir(), "expiry": expiry}
+                if not isinstance(DATA.get("banned_list"), dict): DATA["banned_list"] = {}
+                DATA["banned_list"][uid] = ban_entry
                 DATA["game_db"][uid][vt] = 0
                 self.reason_box.start_ban_blink(vt)
-        save_db()
+                save_db({"action": "auto_ban", "uid": uid, "info": ban_entry})
+            else:
+                save_db({"action": "report", "uid": uid, "khalaf": vt, "new_count": count})
         self.p_id.text = ""
 
     def on_touch_down(self, t):
@@ -384,6 +449,9 @@ class EntryScreen(Screen):
                 if self.taps >= 5: self.manager.current = 'admin_verify'; self.taps = 0
                 return True
         return super().on_touch_down(t)
+# -*- coding: utf-8 -*-
+# بخش ۶ از ۷ - سیستم نمایش دیتای ابری و مدیریت جریمه‌ها
+
 class StatusScreen(Screen):
     def on_enter(self): self.refresh()
     def __init__(self, **kw):
@@ -406,6 +474,7 @@ class StatusScreen(Screen):
     def refresh(self, *args):
         self.grid.clear_widgets(); q = self.search.text.strip().lower()
         with db_lock:
+            if not isinstance(DATA.get("game_db"), dict): DATA["game_db"] = {}
             items = list(DATA.get("game_db", {}).items())
             for uid, reps in items:
                 if q and q not in uid.lower(): continue
@@ -425,11 +494,12 @@ class StatusScreen(Screen):
 
     def quick_unb(self, uid):
         u = getattr(App.get_running_app(), 'session_user', '')
-        # اصلاح: حذف نیاز به رمز برای ادمین و مجازین (Permissions)
         is_permitted = u == "admin" or u in DATA.get("permissions", [])
         if is_permitted or self.adm_key.text == "MAHDI@#25#":
-            with db_lock: DATA["game_db"].pop(uid, None)
-            save_db(); self.adm_key.text = ""; self.refresh()
+            with db_lock:
+                if isinstance(DATA.get("game_db"), dict): DATA["game_db"].pop(uid, None)
+            save_db({"action": "reset_player", "uid": uid})
+            self.adm_key.text = ""; self.refresh()
         else: self.adm_key.text = "PERMISSION DENIED"
 
 class BlacklistScreen(Screen):
@@ -447,7 +517,9 @@ class BlacklistScreen(Screen):
     def refresh(self):
         self.grid.clear_widgets()
         with db_lock:
-            for uid in DATA.get("blacklist", []):
+            bl_list = DATA.get("blacklist")
+            if not isinstance(bl_list, list): DATA["blacklist"] = []; bl_list = []
+            for uid in bl_list:
                 c = BoxLayout(size_hint_y=None, height=65, padding=10)
                 with c.canvas.before: Color(0.1, 0.1, 0.1, 1); RoundedRectangle(pos=c.pos, size=c.size, radius=[8,])
                 c.add_widget(Label(text=f"BANNED ID: {uid}", bold=True, color=(1, 0.4, 0.4, 1)))
@@ -460,9 +532,13 @@ class BlacklistScreen(Screen):
         is_permitted = u == "admin" or u in DATA.get("permissions", [])
         if is_permitted or self.key.text == "MAHDI@#25#":
             with db_lock: 
-                if uid in DATA["blacklist"]: DATA["blacklist"].remove(uid)
-            save_db(); self.key.text = ""; self.refresh()
+                if isinstance(DATA.get("blacklist"), list) and uid in DATA["blacklist"]: 
+                    DATA["blacklist"].remove(uid)
+            save_db({"action": "remove_blacklist", "uid": uid})
+            self.key.text = ""; self.refresh()
         else: self.key.text = "NO PERMISSION"
+# -*- coding: utf-8 -*-
+# بخش ۷ از ۷ - مدیریت کلان (Owner Dashboard) و اجرای نهایی اپلیکیشن
 
 class BannedScreen(Screen):
     def on_enter(self): 
@@ -479,9 +555,10 @@ class BannedScreen(Screen):
 
     def refresh(self, *args):
         self.grid.clear_widgets(); now = get_accurate_now()
-        with db_lock: items = list(DATA.get("banned_list", {}).items())
+        with db_lock:
+            if not isinstance(DATA.get("banned_list"), dict): DATA["banned_list"] = {}
+            items = list(DATA.get("banned_list", {}).items())
         for uid, info in items:
-            # محاسبه ساعت باقی‌مانده بر اساس زمان حالِ ایران
             rem_h = max(0, int((info.get('expiry', 0) - now) / 3600))
             c = BoxLayout(orientation='vertical', size_hint_y=None, height=115, padding=10, spacing=5)
             with c.canvas.before: Color(0.2, 0.1, 0.14, 1); r = RoundedRectangle(pos=c.pos, size=c.size, radius=[12,])
@@ -495,13 +572,14 @@ class BannedScreen(Screen):
         is_permitted = u == "admin" or u in DATA.get("permissions", [])
         if is_permitted or self.key.text == "MAHDI@#25#":
             with db_lock: 
-                if uid in DATA["banned_list"]: DATA["banned_list"].pop(uid)
-            save_db(); self.key.text = ""; self.refresh()
-        else: self.key.text = "NO PERMISSION"
+                if isinstance(DATA.get("banned_list"), dict) and uid in DATA["banned_list"]: DATA["banned_list"].pop(uid)
+            save_db({"action": "unban_player", "uid": uid})
+            self.key.text = ""; self.refresh()
+
 class AdminPanel(Screen):
     def __init__(self, **kw):
         super().__init__(**kw); l = BoxLayout(orientation='vertical', padding=25, spacing=15)
-        l.add_widget(Label(text="OWNER DASHBOARD (v1.1)", bold=True, size_hint_y=0.1, font_size='22sp'))
+        l.add_widget(Label(text="OWNER DASHBOARD (v1.2)", bold=True, size_hint_y=0.1, font_size='22sp'))
         btn_grid = GridLayout(cols=1, spacing=12, size_hint_y=0.7)
         btn_grid.add_widget(ModernButton(text="TAYIDE NAZERIN (Requests)", bg_color=(0.1, 0.4, 0.4, 1), on_press=self.show_req_popup))
         btn_grid.add_widget(ModernButton(text="LIST & EKRAJE NAZERIN", bg_color=(0.2, 0.3, 0.5, 1), on_press=self.show_staff_mgmt))
@@ -533,7 +611,7 @@ class AdminPanel(Screen):
         with db_lock:
             if u in DATA["permissions"]: DATA["permissions"].remove(u)
             else: DATA["permissions"].append(u)
-        save_db()
+        save_db({"action": "toggle_permission", "u": u})
 
     def show_req_popup(self, x):
         box = BoxLayout(orientation='vertical', padding=10, spacing=10)
@@ -552,9 +630,8 @@ class AdminPanel(Screen):
             if u in DATA.get("ejected_users", []): DATA["ejected_users"].remove(u)
             DATA["users"][u] = {"pass": p, "status": "approved", "device": ""}
             if u in DATA["pending_requests"]: DATA["pending_requests"].pop(u)
-            # ثبت تایید با ساعت ایران
             add_staff_log(u, "TAYID MAJJAD")
-        save_db()
+        save_db({"action": "approve_user", "u": u, "p": p})
 
     def show_staff_mgmt(self, x):
         box = BoxLayout(orientation='vertical', padding=10, spacing=10)
@@ -571,12 +648,11 @@ class AdminPanel(Screen):
 
     def eject(self, u):
         with db_lock:
-            # ابطال آنی تمام دسترسی‌های ویژه ناظر اخراج شده
             if u in DATA.get("permissions", []): DATA["permissions"].remove(u)
             if u not in DATA["ejected_users"]: DATA["ejected_users"].append(u)
             if u in DATA["users"]: DATA["users"][u]["status"] = "ejected"
             add_staff_log(u, "EKRAJ SHOD")
-        save_db()
+        save_db({"action": "eject_user", "u": u})
 
     def show_staff_logs(self, x):
         box = BoxLayout(orientation='vertical', padding=10, spacing=10)
@@ -586,7 +662,6 @@ class AdminPanel(Screen):
             for entry in DATA.get("staff_activity", []):
                 c = BoxLayout(orientation='vertical', size_hint_y=None, height=85, padding=10)
                 with c.canvas.before: Color(0.12, 0.15, 0.2, 1); RoundedRectangle(pos=c.pos, size=c.size, radius=[8,])
-                # نمایش لاگ‌ها با ساعت ثبت شده به وقت ایران
                 c.add_widget(Label(text=f"Staff: {entry['staff']} | Target: {entry['target']}", bold=True, font_size='12sp'))
                 c.add_widget(Label(text=f"Action: {entry['action']} | Time: {entry['time']}", font_size='10sp', color=(0.6,0.6,0.6,1)))
                 grid.add_widget(c)
@@ -601,7 +676,8 @@ class AdminPanel(Screen):
             with db_lock:
                 DATA["global_notice"] = not_inp.text
                 if bl_inp.text and bl_inp.text not in DATA["blacklist"]: DATA["blacklist"].append(bl_inp.text)
-            save_db(); pop.dismiss()
+            save_db({"action": "update_tools", "notice": not_inp.text, "bl": bl_inp.text})
+            pop.dismiss()
         box.add_widget(ModernButton(text="SABT", bg_color=(0.1, 0.4, 0.2, 1), on_press=save_tools))
         pop = Popup(title="Admin Tools", content=box, size_hint=(0.8, 0.6)); pop.open()
 
@@ -614,7 +690,8 @@ class AdminVerifyScreen(Screen):
         l.add_widget(ModernButton(text="BACK", height=50, bg_color=(0.2,0.2,0.2,1), on_press=lambda x: setattr(self.manager, 'current', 'entry')))
         self.add_widget(l)
     def verify(self, x):
-        if self.c.text == "MAHDI@#25#": self.c.text = ""; self.manager.current = 'admin_panel'
+        if self.c.text == "MAHDI@#25#": 
+            self.c.text = ""; self.manager.current = 'admin_panel'
         else: self.c.text = "WRONG KEY"
 
 class TeamNezaratApp(App):
