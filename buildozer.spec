@@ -18,8 +18,8 @@ source.include_exts = py,png,jpg,json,kv
 version = 0.2
 
 # (list) Application requirements
-# قفل کردن نسخه‌ها برای پایداری در محیط گیت‌هاب
-requirements = python3,kivy==2.2.1,requests,urllib3,certifi,chardet,idna
+# اضافه شدن openssl برای حل مشکل شبکه و حفظ پایداری بقیه نسخه‌ها
+requirements = python3,kivy==2.2.1,requests,urllib3,certifi,chardet,idna,openssl
 
 # (list) Permissions
 android.permissions = INTERNET
@@ -37,7 +37,8 @@ android.ndk = 25b
 android.accept_sdk_license = True
 
 # (str) The Android arch to build for
-android.archs = armeabi-v7a
+# اضافه شدن معماری 64 بیتی برای سازگاری با تمام گوشی‌های جدید
+android.archs = arm64-v8a, armeabi-v7a
 
 # (str) Icon of the application (مطمئن شو فایل logo.png در گیت‌هاب هست)
 icon.filename = logo.png
