@@ -212,10 +212,8 @@ def load_db():
             DATA[key] = [] if key in ["staff_activity", "ejected_users", "permissions", "blacklist"] else {}
     
     check_auto_unban()
-    threading.Thread(target=fetch_cloud_engine, daemon=True).start()
-
 def fetch_cloud_engine(on_complete=None):
-    """دریافت دیتای خالص (اصلاح باگ حذف دستی و تبدیل اشتباه داده‌های PHP)"""
+    """دریافت دیتای خالص (اصلاح شده برای دریافت لیست درخواست‌های عضویت)"""
     global _NET_STATUS, DATA
     try:
         r = requests.get(f"{IRAN_BRIDGE_URL}?v={time.time()}", headers=HEADERS, timeout=10, verify=False)
@@ -225,7 +223,6 @@ def fetch_cloud_engine(on_complete=None):
             if cloud and isinstance(cloud, dict):
                 with db_lock:
                     saved_local = dict(DATA.get("saved_creds", {}))
-                    # اطمینان از صحت نوع داده‌ها برای جلوگیری از AttributeError در پایتون
                     DATA["game_db"] = cloud.get("game_db") if isinstance(cloud.get("game_db"), dict) else {}
                     DATA["banned_list"] = cloud.get("banned_list") if isinstance(cloud.get("banned_list"), dict) else {}
                     DATA["blacklist"] = cloud.get("blacklist") if isinstance(cloud.get("blacklist"), list) else []
@@ -233,6 +230,8 @@ def fetch_cloud_engine(on_complete=None):
                     DATA["users"] = cloud.get("users") if isinstance(cloud.get("users"), dict) else {}
                     DATA["permissions"] = cloud.get("permissions") if isinstance(cloud.get("permissions"), list) else []
                     DATA["ejected_users"] = cloud.get("ejected_users") if isinstance(cloud.get("ejected_users"), list) else []
+                    # اصلاح حیاتی: دریافت لیست درخواست‌ها از فایل JSON هاست
+                    DATA["pending_requests"] = cloud.get("pending_requests") if isinstance(cloud.get("pending_requests"), dict) else {}
                     DATA["saved_creds"] = saved_local
                 check_auto_unban()
                 if on_complete: Clock.schedule_once(lambda dt: on_complete(True))
@@ -240,6 +239,7 @@ def fetch_cloud_engine(on_complete=None):
             if on_complete: Clock.schedule_once(lambda dt: on_complete(False))
     except:
         if on_complete: Clock.schedule_once(lambda dt: on_complete(False))
+
 class ConnectionLight(BoxLayout):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -252,18 +252,17 @@ class ConnectionLight(BoxLayout):
         Clock.schedule_interval(self.update_status, 5)
 
     def update_status(self, dt):
-        """آپدیت چراغ وضعیت و پینگ واقعی"""
         threading.Thread(target=sync_time_offset, daemon=True).start()
         self.ping_lbl.text = f"{_PING_VALUE}ms"
         
         self.led.canvas.before.clear()
         with self.led.canvas.before:
             if not _NET_STATUS: 
-                Color(0.8, 0.2, 0.2, 1) # قرمز: قطع
+                Color(0.8, 0.2, 0.2, 1)
             elif int(_PING_VALUE) < 150: 
-                Color(0.2, 0.8, 0.2, 1) # سبز: پینگ عالی
+                Color(0.2, 0.8, 0.2, 1)
             else: 
-                Color(0.8, 0.8, 0.2, 1) # زرد: پینگ متوسط
+                Color(0.8, 0.8, 0.2, 1)
             
             self._rect = RoundedRectangle(pos=self.led.pos, size=self.led.size, radius=[6,])
         
@@ -283,7 +282,6 @@ class ModernButton(Button):
         with self.canvas.before: 
             Color(*self.bg_color)
             RoundedRectangle(pos=self.pos, size=self.size, radius=self.radius)
-
 class DynamicBlinkingInput(TextInput):
     def __init__(self, **kwargs):
         super().__init__(**kwargs); self.readonly = True; self.halign = 'center'
@@ -291,7 +289,6 @@ class DynamicBlinkingInput(TextInput):
         self.foreground_color = (0.9, 0.9, 0.9, 1); self.is_blinking = False
         self._blink_ev = None
     def start_ban_blink(self, reason_text):
-        # اصلاح باگ نشت حافظه: توقف تایمر قبلی قبل از شروع جدید
         if self._blink_ev: Clock.unschedule(self._blink_ev)
         self.is_blinking = True
         self.text = f"!!! BAN {reason_text} !!!"
@@ -310,7 +307,6 @@ class ModernInput(TextInput):
         self.foreground_color = (0.9, 0.9, 0.9, 1); self.padding = [10, 10]; self.multiline = False
 
 def add_staff_log(target_id, action):
-    """ثبت سوابق در حافظه داخلی با رعایت ساختار لیست"""
     staff = getattr(App.get_running_app(), 'session_user', 'System')
     full_time = get_full_time_ir()
     entry = {"staff": staff, "target": target_id, "action": action, "time": full_time}
@@ -318,11 +314,9 @@ def add_staff_log(target_id, action):
         if "staff_activity" not in DATA or not isinstance(DATA["staff_activity"], list):
             DATA["staff_activity"] = []
         DATA["staff_activity"].insert(0, entry)
-# -*- coding: utf-8 -*-
 
 class LoginScreen(Screen):
     def on_enter(self): 
-        """بررسی ورود خودکار با تفکیک هویت و اصلاح پینگ"""
         threading.Thread(target=sync_time_offset, daemon=True).start()
         with db_lock:
             creds = LOCAL_SETTINGS.get("saved_creds", {})
@@ -351,7 +345,6 @@ class LoginScreen(Screen):
 
     def _final_login_check(self):
         u, p = self.u.text.strip(), self.p.text.strip()
-        # استخراج کد اختصاصی سخت‌افزار
         if platform == 'android':
             try:
                 from jnius import autoclass
@@ -391,8 +384,6 @@ class LoginScreen(Screen):
                 if not isinstance(DATA.get("pending_requests"), dict): DATA["pending_requests"] = {}
                 DATA["pending_requests"][u] = p
             save_db({"action": "request_join", "u": u, "p": p}); self.u.text = "ERSAL SHOD."
-
-# نقشه زمان‌بندی بن
 BAN_DAYS_MAP = {"ETLAGH": 1, "USER/NAME": 2, "FAHASHI": 3, "TABANI": 5, "BI EHTARAMI": 4, "RADE SANI": 7}
 class EntryScreen(Screen):
     def on_enter(self):
